@@ -54,7 +54,13 @@ except ImportError:
 
 from datetime import datetime
 
-from live_trade_info_utils import MODE_SINGLE_DAY, TRADE_MODE_CELL, TRADE_MODE_SHEET
+from live_trade_info_utils import (
+    MODE_FULL_AUTO,
+    MODE_SINGLE_DAY,
+    TRADE_MODE_CELL,
+    TRADE_MODE_SHEET,
+    get_trade_sheet_name,
+)
 
 from Schwab_Auth import create_client
 from earnings_exit_type_utils import read_exit_types_from_latest_earnings
@@ -281,25 +287,41 @@ def main() -> int:
         except Exception:
             trade_mode_value = None
 
-        if trade_mode_value is not None and str(trade_mode_value).strip().lower() == MODE_SINGLE_DAY.lower():
+        mode_lower = str(trade_mode_value).strip().lower() if trade_mode_value is not None else ""
+        full_auto = mode_lower == MODE_FULL_AUTO.lower()
+        if mode_lower == MODE_SINGLE_DAY.lower():
             sheet_name = "Daily_Trades"
+        elif full_auto:
+            sheet_name = get_trade_sheet_name(LIVE_INFO_FILE)
+            if not sheet_name:
+                print("Full_Auto: today is not a trading day; nothing to exit.")
+                wb.close()
+                return 0
         else:
+            # Emergency Exit Order Run
+            # To run a specific day from the past, to send exit orders, change the line below to that day's name
             sheet_name = datetime.now().strftime("%A")
         try:
             sheet = wb.sheets[sheet_name]
         except Exception:
             print(f"Sheet '{sheet_name}' not found in {LIVE_INFO_FILE}.")
             wb.close()
-            return 1
+            # Full_Auto with no trades for today is expected — clean success.
+            return 0 if full_auto else 1
 
         # Refresh exit-type values from Latest Earnings (just before sending orders).
         # Latest Earnings -> Live_Trade_Info:
         #   AB (IBKR Exit) -> Live_Trade_Info column D
         single_day_mode = sheet_name == "Daily_Trades"
-        target_sheet_names = ["Daily_Trades"] if single_day_mode else ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday"]
+        if full_auto:
+            target_sheet_names = [sheet_name]
+        else:
+            target_sheet_names = ["Daily_Trades"] if single_day_mode else ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday"]
         try:
             print("\nRefreshing secondary ToS exit types from Latest Earnings Document (AB -> column D)...")
-            lookup = read_exit_types_from_latest_earnings(single_day=single_day_mode)
+            lookup = read_exit_types_from_latest_earnings(
+                single_day=single_day_mode, full_auto=full_auto
+            )
         except Exception as e:
             print(f"Failed to refresh exit types from Latest Earnings: {e}")
             wb.close()

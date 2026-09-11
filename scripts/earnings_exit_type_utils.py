@@ -79,20 +79,25 @@ def _build_exit_type_lookup(
     ab_vals: List[Any],
     *,
     single_day: bool,
+    full_auto: bool = False,
 ) -> Dict[str, Dict[str, str]]:
     row_count = len(o_vals)
     lookup: Dict[str, Dict[str, str]] = {}
     for i in range(row_count):
-        flag_val = _parse_flag(o_vals[i])
-        if flag_val is None:
-            continue
-
-        if single_day:
-            if flag_val != "T":
-                continue
+        if full_auto:
+            # Full_Auto ignores column O; include any row with a ticker.
+            pass
         else:
-            if not isinstance(flag_val, int):
+            flag_val = _parse_flag(o_vals[i] if i < len(o_vals) else None)
+            if flag_val is None:
                 continue
+
+            if single_day:
+                if flag_val != "T":
+                    continue
+            else:
+                if not isinstance(flag_val, int):
+                    continue
 
         ticker_val = a_vals[i] if i < len(a_vals) else None
         if ticker_val is None or str(ticker_val).strip() == "":
@@ -238,6 +243,7 @@ def _read_columns_xlwings(
 def read_exit_types_from_latest_earnings(
     *,
     single_day: bool,
+    full_auto: bool = False,
     earnings_file: str = LATEST_EARNINGS_FILE,
     earnings_sheet: str = LATEST_EARNINGS_SHEET,
 ) -> Dict[str, Dict[str, str]]:
@@ -251,6 +257,7 @@ def read_exit_types_from_latest_earnings(
         }
 
     Filtering:
+    - full_auto=True     -> include rows with a ticker (ignore column O)
     - single_day=True  -> include only rows where flag (col O) == "T"
     - single_day=False -> include only rows where flag (col O) is 1..5
 
@@ -283,5 +290,5 @@ def read_exit_types_from_latest_earnings(
             ) from e
 
     return _build_exit_type_lookup(
-        o_vals, a_vals, aa_vals, ab_vals, single_day=single_day
+        o_vals, a_vals, aa_vals, ab_vals, single_day=single_day, full_auto=full_auto
     )

@@ -69,11 +69,14 @@ def read_live_trades() -> List[Tuple[str, str, int]]:
         raise FileNotFoundError(f"Live trade info file not found: {LIVE_INFO_FILE}")
 
     sheet_name = get_trade_sheet_name(LIVE_INFO_FILE)
+    if not sheet_name:
+        print("Full_Auto: today is not a trading day; no opening orders.")
+        return []
     wb = load_workbook(LIVE_INFO_FILE, data_only=True)
-    if sheet_name in wb.sheetnames:
-        ws = wb[sheet_name]
-    else:
-        ws = wb.active
+    if sheet_name not in wb.sheetnames:
+        print(f"Sheet '{sheet_name}' not found in {LIVE_INFO_FILE}; nothing to open.")
+        return []
+    ws = wb[sheet_name]
 
     trades: List[Tuple[str, str, int]] = []
 
