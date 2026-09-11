@@ -178,6 +178,11 @@ def add_trading_days(d: date, n: int) -> date:
     return cur
 
 
+def next_trading_day(d: date) -> date:
+    """Next NYSE trading day strictly after d."""
+    return add_trading_days(d, 1)
+
+
 def cell_has_value(cell_value: Any) -> bool:
     if cell_value is None:
         return False

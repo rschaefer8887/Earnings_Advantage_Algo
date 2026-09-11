@@ -24,6 +24,7 @@ except ImportError:
 
 from Schwab_Auth import create_client
 from earnings_workbook_utils import open_or_attach_earnings_workbook, release_earnings_workbook
+from price_run_timestamps import write_opens_success
 
 _SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 _BASE_DIR = os.path.dirname(_SCRIPT_DIR)
@@ -215,6 +216,7 @@ def main() -> None:
         else:
             wb.save()
             print("Opening prices written to Latest Earnings (saved via Excel).")
+            write_opens_success()
 
         print(
             f"\nTickers resolved for column {COL_OPENING_PRICE}: "

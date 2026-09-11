@@ -11,15 +11,20 @@ Price calendar (entry day D from M+K, trading days only):
 Get_Closes_ToS Q chain: M2 until M1; M1 until C; C until 0.
   - M1 ends at C (never write a Q 0 for M1 — that 0 would land on the C row).
   - M2 ends at M1, or at C if no M1.
-  - Only C gets a Q trailing 0 (placed at first blank column-M row within 100 rows below C, else C+100).
+  - Only C gets a Q trailing 0 (placed on the column-A zz end-of-trades row).
   - O (column P) trailing 0 must sit on the same row as C (P=0, Q=C).
-  - If M1/O runs with no C below, create C on the terminator row and Q 0 after it.
+  - If M1/O runs with no C below, create C on the terminator row and Q 0 on zz after it.
 
 No-op when there are no eligible rows for a job.
 
 After writing flags, validate_flag_layout_strict() enforces:
   O row == M1 row; P closing 0 row == C row; M2 row < M1 row (or < C if no M1).
 Failure raises FlagLayoutError (Stage exits non-zero).
+
+Evening Stage (after successful Get_Opens + Get_Closes today, dests filled):
+  clear completed flags and place as-of the next trading day.
+Morning Stage: place as-of calendar today.
+
 """
 
 from __future__ import annotations
@@ -33,10 +38,12 @@ from full_auto_utils import (
     add_trading_days,
     cell_has_value,
     is_trading_day,
+    next_trading_day,
     parse_earnings_date,
     parse_m_dow,
     resolve_trade_date,
 )
+from price_run_timestamps import opens_and_closes_succeeded_on
 from earnings_workbook_utils import (
     LATEST_EARNINGS_FILE,
     LATEST_EARNINGS_SHEET,
@@ -149,6 +156,25 @@ def _sheet_max_row(sheet) -> int:
         return HEADER_ROW + 500
 
 
+def _sheet_scan_max_row(sheet) -> int:
+    """
+    Upper bound for flag scans: used_range plus M day flag, ticker, or zz end marker.
+    Avoids missing rows just beyond Excel used_range.
+    """
+    max_row = _sheet_max_row(sheet)
+    # Probe a cushion below used_range for M/ticker/zz that Excel has not marked used yet
+    probe_to = max(max_row + 50, HEADER_ROW + 500)
+    last = max_row
+    for row in range(HEADER_ROW + 1, probe_to + 1):
+        m = sheet.range(f"{COL_M}{row}").value
+        a = sheet.range(f"{COL_TICKER}{row}").value
+        has_m = parse_m_dow(m) is not None
+        has_a = a is not None and str(a).strip() != ""
+        if has_m or has_a:
+            last = max(last, row)
+    return last
+
+
 def _find_next_c_row(sheet, after_row: int, max_row: int) -> Optional[int]:
     """First Q C at or below after_row (inclusive)."""
     for row in range(after_row, max_row + 1):
@@ -158,7 +184,10 @@ def _find_next_c_row(sheet, after_row: int, max_row: int) -> Optional[int]:
 
 
 def _write_q_zero_safe(sheet, zero_row: int) -> bool:
-    """Write Q stop 0 only if it would not overwrite M2/M1/C. Returns True if written."""
+    """Write Q stop 0 only if it would not overwrite M2/M1/C or land on a trade row."""
+    if _row_is_trade_or_ticker(sheet, zero_row):
+        print(f"  Skip Q 0@{zero_row}: trade/ticker row (needs C, not 0).")
+        return False
     existing = sheet.range(f"{COL_Q}{zero_row}").value
     if _is_q_chain_flag(existing):
         print(
@@ -205,21 +234,52 @@ def _clear_stale_q_stop_after_block(sheet, last_data_row: int) -> None:
         print(f"  Cleared stale Q 0@{after} after M1/M2 block (protect C row).")
 
 
-# Max rows below C to search for end-of-file (blank column M) when placing Q 0.
-C_RANGE_ZERO_MAX_OFFSET = 100
+# Max rows below C to search for column-A "zz" (end of trade table) when placing Q 0.
+C_RANGE_ZERO_MAX_OFFSET = 500
+
+
+def _is_zz_end_marker(cell_value: Any) -> bool:
+    """Column A 'zz' marks the end of the trade table (not a ticker)."""
+    if cell_value is None:
+        return False
+    return str(cell_value).strip().upper() == "ZZ"
+
+
+def _row_is_trade_or_ticker(sheet, row: int) -> bool:
+    """True if column M has a day flag OR column A has a real ticker (not zz)."""
+    if parse_m_dow(sheet.range(f"{COL_M}{row}").value) is not None:
+        return True
+    a = sheet.range(f"{COL_TICKER}{row}").value
+    if a is None or str(a).strip() == "":
+        return False
+    if _is_zz_end_marker(a):
+        return False
+    return True
+
+
+def _find_zz_end_row(sheet, start_row: int) -> Optional[int]:
+    """First column-A zz at or below start_row (end of trades marker)."""
+    max_row = _sheet_scan_max_row(sheet)
+    probe_to = max(max_row, start_row + C_RANGE_ZERO_MAX_OFFSET)
+    for row in range(start_row, probe_to + 1):
+        if _is_zz_end_marker(sheet.range(f"{COL_TICKER}{row}").value):
+            return row
+    return None
 
 
 def _resolve_q_zero_row_after_c(sheet, c_row: int) -> int:
     """
-    Row for the Q 0 that ends the C range.
-
-    Scan down from the row after C, up to C_RANGE_ZERO_MAX_OFFSET rows:
-      - first row with no day flag in column M (end of trade list) -> place 0 there
-      - if every row in the window still has M -> place 0 at C + 100
+    Row for the Q 0 that ends the C range: the column-A 'zz' end-of-trades row.
+    Falls back only if zz is missing (should not happen on a normal sheet).
     """
+    zz_row = _find_zz_end_row(sheet, c_row + 1)
+    if zz_row is not None:
+        return zz_row
+    # Fallback: first non-trade row below C (legacy)
+    print(f"  Warning: no column-A zz below C@{c_row}; falling back to first blank trade row.")
     for offset in range(1, C_RANGE_ZERO_MAX_OFFSET + 1):
         row = c_row + offset
-        if parse_m_dow(sheet.range(f"{COL_M}{row}").value) is None:
+        if not _row_is_trade_or_ticker(sheet, row):
             return row
     return c_row + C_RANGE_ZERO_MAX_OFFSET
 
@@ -233,20 +293,32 @@ def _clear_stale_q_zeros_between(sheet, start_row_exclusive: int, end_row_exclus
             print(f"  Cleared stale Q 0@{r} before new C-range terminator.")
 
 
+def _clear_stale_q_zeros_after(sheet, after_row: int) -> None:
+    """Remove Q stop 0s below the zz terminator (e.g. prior far placements)."""
+    max_row = _sheet_scan_max_row(sheet)
+    for r in range(after_row + 1, max_row + 1):
+        val = sheet.range(f"{COL_Q}{r}").value
+        if _is_stop_flag(val) and not _is_q_chain_flag(val):
+            sheet.range(f"{COL_Q}{r}").value = None
+            print(f"  Cleared stale Q 0@{r} below zz terminator.")
+
+
 def _place_q_zero_after_c(sheet, c_row: int) -> int:
     """
-    Write the Q 0 that closes the C range (far terminator).
-    Clears stale early 0s between C and the new terminator row.
+    Write the Q 0 that closes the C range on the column-A zz row.
+    Clears stale early 0s between C and zz, and any 0s below zz.
     """
     zero_row = _resolve_q_zero_row_after_c(sheet, c_row)
     _clear_stale_q_zeros_between(sheet, c_row, zero_row)
+    _clear_stale_q_zeros_after(sheet, zero_row)
     if _write_q_zero_safe(sheet, zero_row):
-        print(f"  Q C-range terminator 0@{zero_row} (C@{c_row})")
+        zz_note = " (zz)" if _is_zz_end_marker(sheet.range(f"{COL_TICKER}{zero_row}").value) else ""
+        print(f"  Q C-range terminator 0@{zero_row}{zz_note} (C@{c_row})")
     return zero_row
 
 
 def _write_q_c_range(sheet, start_row: int, last_data_row: int) -> int:
-    """Column Q: C at start; 0 at end-of-M / up to 100 rows below C."""
+    """Column Q: C at start; 0 on the column-A zz end-of-trades row."""
     for r in range(start_row, last_data_row + 1):
         sheet.range(f"{COL_Q}{r}").value = None
     sheet.range(f"{COL_Q}{start_row}").value = "C"
@@ -265,7 +337,7 @@ def _ensure_c_row_for_m1_o(
 
     - Prefer an existing C below the M1 data rows.
     - If none, write C at last_data_row+1 (never leave that cell as Q 0).
-    - Place Q stop 0 via end-of-M / 100-row rule after C.
+    - Place Q stop 0 on the column-A zz end-of-trades row after C.
     Returns the C row (same row as P's closing 0).
     """
     c_row = _find_next_c_row(sheet, last_data_row + 1, max_row)
@@ -321,7 +393,7 @@ class FlagLayoutError(ValueError):
 
 def _scan_flag_rows(sheet) -> dict:
     """Collect P/Q flag row numbers from the Trades data area."""
-    max_row = _sheet_max_row(sheet)
+    max_row = _sheet_scan_max_row(sheet)
     start = HEADER_ROW + 1
     out = {
         "o": [],
@@ -347,6 +419,209 @@ def _scan_flag_rows(sheet) -> dict:
         if _is_stop_flag(q):
             out["q_zero"].append(row)
     return out
+
+
+
+def _is_trade_row(sheet, row: int) -> bool:
+    """True if column M has a day flag OR column A has a ticker."""
+    return _row_is_trade_or_ticker(sheet, row)
+
+
+def _last_trade_row(sheet) -> Optional[int]:
+    max_row = _sheet_scan_max_row(sheet)
+    last = None
+    for row in range(HEADER_ROW + 1, max_row + 1):
+        if _is_trade_row(sheet, row):
+            last = row
+    return last
+
+
+def _m1_is_terminal_trade_block(sheet) -> bool:
+    """
+    Exception: no C required when the sheet's last trades are the M1 block
+    (nothing below to size with a future C close).
+    """
+    max_row = _sheet_scan_max_row(sheet)
+    m1_start = None
+    for row in range(HEADER_ROW + 1, max_row + 1):
+        if _is_q_m1_flag(sheet.range(f"{COL_Q}{row}").value):
+            m1_start = row
+            break
+    if m1_start is None:
+        return False
+    last_trade = _last_trade_row(sheet)
+    if last_trade is None or last_trade < m1_start:
+        return False
+    # End of M1 data = contiguous trade rows from M1 until blank M / next chain flag / stop
+    end = m1_start
+    for row in range(m1_start, max_row + 1):
+        if row > m1_start:
+            q = sheet.range(f"{COL_Q}{row}").value
+            if _is_stop_flag(q) or _is_q_m2_flag(q) or _is_q_c_flag(q):
+                break
+        if _is_trade_row(sheet, row):
+            end = row
+        elif row > m1_start:
+            break
+    return last_trade <= end
+
+
+def _trade_row_c_rows(sheet) -> List[int]:
+    max_row = _sheet_scan_max_row(sheet)
+    out: List[int] = []
+    for row in range(HEADER_ROW + 1, max_row + 1):
+        if _is_q_c_flag(sheet.range(f"{COL_Q}{row}").value) and _is_trade_row(sheet, row):
+            out.append(row)
+    return out
+
+
+def _next_c_group_start_after(
+    all_rows: Sequence[EarningsRow],
+    after_row: int,
+    as_of: Optional[date] = None,
+) -> Optional[int]:
+    """
+    Start row of the next Full_Auto earnings group below after_row.
+
+    Prefer the first group with trade_date >= as_of (future C / sizing block).
+    Fall back to the first group below after_row if none match as_of.
+    Never returns a bare ticker/M row that is not in all_rows.
+    """
+    below = [r for r in all_rows if r.row > after_row]
+    if not below:
+        return None
+    groups = _contiguous_groups(below)
+    if not groups:
+        return None
+    if as_of is not None:
+        for g in groups:
+            if g[0].trade_date >= as_of:
+                return g[0].row
+    return groups[0][0].row
+
+
+def _clear_misplaced_c_between(sheet, start_exclusive: int, end_exclusive: int) -> None:
+    """Clear C flags strictly between M2 end and the correct next-group C row."""
+    for row in range(start_exclusive + 1, end_exclusive):
+        if _is_q_c_flag(sheet.range(f"{COL_Q}{row}").value):
+            sheet.range(f"{COL_Q}{row}").value = None
+            print(f"  Cleared misplaced Q C@{row} (before next earnings group @{end_exclusive})")
+
+
+def _ensure_c_after_m2_if_needed(
+    sheet,
+    last_m2_data_row: int,
+    all_rows: Sequence[EarningsRow],
+    as_of: date,
+) -> bool:
+    """
+    After an M2-only write: place C at the next earnings group's start
+    (trade_date >= as_of when available), not on the first ticker row after M2.
+    Returns True if a C was written/ensured.
+    """
+    next_row = last_m2_data_row + 1
+    c_at = _next_c_group_start_after(all_rows, last_m2_data_row, as_of=as_of)
+
+    if c_at is None:
+        # No future earnings groups — M2-only stop 0 on column-A zz
+        zz_row = _find_zz_end_row(sheet, next_row)
+        blank = zz_row
+        if blank is None:
+            blank = next_row
+            for row in range(next_row, next_row + C_RANGE_ZERO_MAX_OFFSET + 1):
+                if not _is_trade_row(sheet, row):
+                    blank = row
+                    break
+        if _write_q_zero_safe(sheet, blank):
+            note = " (zz)" if zz_row is not None else ""
+            print(f"  M2-only: wrote Q 0@{blank}{note} (no next earnings group)")
+        return False
+
+    q = sheet.range(f"{COL_Q}{c_at}").value
+    if _is_q_m1_flag(q):
+        print(f"  M2-only: next earnings group @{c_at} is M1; no C required yet")
+        return False
+
+    _clear_misplaced_c_between(sheet, last_m2_data_row, c_at)
+
+    if _is_stop_flag(q):
+        sheet.range(f"{COL_Q}{c_at}").value = None
+        print(f"  Cleared Q 0@{c_at} on next earnings group (will place C)")
+
+    if not _is_q_c_flag(sheet.range(f"{COL_Q}{c_at}").value):
+        sheet.range(f"{COL_Q}{c_at}").value = "C"
+        print(
+            f"  Ensured Q C@{c_at} after M2 "
+            f"(next earnings group start; as-of {as_of})"
+        )
+    _place_q_zero_after_c(sheet, c_at)
+    return True
+
+
+
+def repair_q_layout_before_qc(
+    sheet,
+    wrote_m2_last: Optional[List[int]] = None,
+    all_rows: Optional[Sequence[EarningsRow]] = None,
+    as_of: Optional[date] = None,
+) -> None:
+    """
+    Final repair before strict QC:
+      - Any Q 0 on a trade/ticker row -> clear (do not invent C there)
+      - If no trade-row C and M1 is not terminal -> place C at next earnings group
+        after M2 (same rule as _ensure_c_after_m2_if_needed)
+    """
+    max_row = _sheet_scan_max_row(sheet)
+    print("\nRepairing Q layout before QC...")
+
+    # Clear Q 0 on trade rows (C belongs on next earnings group start, not here)
+    for row in range(HEADER_ROW + 1, max_row + 1):
+        if _is_stop_flag(sheet.range(f"{COL_Q}{row}").value) and _row_is_trade_or_ticker(
+            sheet, row
+        ):
+            sheet.range(f"{COL_Q}{row}").value = None
+            print(f"  Repair: cleared Q 0@{row} on trade/ticker row")
+
+    if _trade_row_c_rows(sheet) or _m1_is_terminal_trade_block(sheet):
+        # Still clear misplaced C that sits above the true next group after M2
+        if all_rows is not None and wrote_m2_last:
+            after = max(wrote_m2_last)
+            correct = _next_c_group_start_after(all_rows, after, as_of=as_of)
+            if correct is not None:
+                _clear_misplaced_c_between(sheet, after, correct)
+                if not _is_q_c_flag(sheet.range(f"{COL_Q}{correct}").value):
+                    if not (
+                        _is_q_m1_flag(sheet.range(f"{COL_Q}{correct}").value)
+                        or _is_q_m2_flag(sheet.range(f"{COL_Q}{correct}").value)
+                    ):
+                        sheet.range(f"{COL_Q}{correct}").value = "C"
+                        print(f"  Repair: moved/placed Q C@{correct} (next earnings group)")
+                        _place_q_zero_after_c(sheet, correct)
+        return
+
+    after = HEADER_ROW
+    if wrote_m2_last:
+        after = max(wrote_m2_last)
+    for row in range(HEADER_ROW + 1, max_row + 1):
+        if _is_q_m2_flag(sheet.range(f"{COL_Q}{row}").value):
+            after = max(after, row)
+
+    c_at = None
+    if all_rows is not None:
+        c_at = _next_c_group_start_after(all_rows, after, as_of=as_of)
+
+    if c_at is None:
+        print("  Repair: could not find next earnings group for required C")
+        return
+
+    _clear_misplaced_c_between(sheet, after, c_at)
+    q = sheet.range(f"{COL_Q}{c_at}").value
+    if _is_q_m1_flag(q) or _is_q_m2_flag(q):
+        print(f"  Repair: next earnings group @{c_at} already has {q}; skip C")
+        return
+    sheet.range(f"{COL_Q}{c_at}").value = "C"
+    print(f"  Repair: placed missing trade-row C@{c_at} (next earnings group)")
+    _place_q_zero_after_c(sheet, c_at)
 
 
 def validate_flag_layout_strict(sheet) -> None:
@@ -421,6 +696,23 @@ def validate_flag_layout_strict(sheet) -> None:
                 f"M2 row(s) must be less than C row(s) when no M1; "
                 f"M2@{m2_rows} C@{c_rows}"
             )
+
+    # 5) Q 0 must not sit on a trade row (that cell should be C)
+    max_row = _sheet_scan_max_row(sheet)
+    for z in flags["q_zero"]:
+        if _is_trade_row(sheet, z):
+            errors.append(
+                f"Q 0@{z} is on a trade/ticker row; "
+                f"expected C there for future closes/sizing"
+            )
+
+    # 6) Always require a trade-row C, unless M1 is the last trade block
+    trade_cs = [r for r in c_rows if _is_trade_row(sheet, r)]
+    if not trade_cs and not _m1_is_terminal_trade_block(sheet):
+        errors.append(
+            "Missing trade-row C in column Q "
+            "(required unless M1 is the last trade block on the sheet)"
+        )
 
     if errors:
         for msg in errors:
@@ -537,21 +829,194 @@ def _flag_job_for_groups(
     return wrote_last_rows
 
 
+def _normalize_ticker_cell(cell_value: Any) -> Optional[str]:
+    if cell_value is None:
+        return None
+    t = str(cell_value).strip().upper()
+    if not t or t == "ZZ":
+        return None
+    return t
+
+
+def _dest_range_complete(sheet, start_row: int, dest_col: str, max_row: int) -> bool:
+    """True if every ticker row from start until next Q chain flag/0 has dest filled."""
+    saw = False
+    for row in range(start_row, max_row + 1):
+        if row > start_row:
+            q = sheet.range(f"{COL_Q}{row}").value
+            if _is_stop_flag(q) or _is_q_chain_flag(q):
+                break
+        if not _normalize_ticker_cell(sheet.range(f"{COL_TICKER}{row}").value):
+            continue
+        saw = True
+        if not cell_has_value(sheet.range(f"{dest_col}{row}").value):
+            return False
+    return saw
+
+
+def _o_range_t_complete(sheet, start_row: int, max_row: int) -> bool:
+    """True if every ticker from O until P 0 has T filled (or no O on start row)."""
+    if not _is_o_flag(sheet.range(f"{COL_P}{start_row}").value):
+        return True
+    for row in range(start_row, max_row + 1):
+        p = sheet.range(f"{COL_P}{row}").value
+        if row > start_row and _is_stop_flag(p):
+            break
+        if not _normalize_ticker_cell(sheet.range(f"{COL_TICKER}{row}").value):
+            continue
+        if not cell_has_value(sheet.range(f"{COL_T}{row}").value):
+            return False
+    return True
+
+
+def _c_range_has_ticker(sheet, start_row: int, max_row: int) -> bool:
+    for r2 in range(start_row, max_row + 1):
+        if r2 > start_row:
+            q2 = sheet.range(f"{COL_Q}{r2}").value
+            if _is_stop_flag(q2) or _is_q_chain_flag(q2):
+                break
+        if _normalize_ticker_cell(sheet.range(f"{COL_TICKER}{r2}").value):
+            return True
+    return False
+
+
+def _active_flag_dests_complete(sheet) -> bool:
+    """QC: every active M2/M1/C data range has dest prices filled."""
+    max_row = _sheet_max_row(sheet)
+    found = False
+    for row in range(HEADER_ROW + 1, max_row + 1):
+        q = sheet.range(f"{COL_Q}{row}").value
+        if _is_q_m2_flag(q):
+            found = True
+            if not _dest_range_complete(sheet, row, COL_V, max_row):
+                print(f"  QC prices: M2@{row} still has empty V")
+                return False
+        elif _is_q_m1_flag(q):
+            found = True
+            if not _dest_range_complete(sheet, row, COL_U, max_row):
+                print(f"  QC prices: M1@{row} still has empty U")
+                return False
+            if not _o_range_t_complete(sheet, row, max_row):
+                print(f"  QC prices: O/M1@{row} still has empty T")
+                return False
+        elif _is_q_c_flag(q):
+            if not _c_range_has_ticker(sheet, row, max_row):
+                continue
+            found = True
+            if not _dest_range_complete(sheet, row, COL_S, max_row):
+                print(f"  QC prices: C@{row} still has empty S")
+                return False
+    if found:
+        print("  QC prices: active flag dest columns are filled")
+    else:
+        print("  QC prices: no active M2/M1/C data ranges (OK)")
+    return True
+
+
+def _clear_p_o_range(sheet, start_row: int, max_row: int) -> None:
+    sheet.range(f"{COL_P}{start_row}").value = None
+    for row in range(start_row, max_row + 1):
+        if _is_stop_flag(sheet.range(f"{COL_P}{row}").value):
+            sheet.range(f"{COL_P}{row}").value = None
+            print(f"  Cleared P O-range stop 0@{row}")
+            break
+
+
+def _clear_q_zeros_after(sheet, start_row: int, max_row: int) -> None:
+    for row in range(start_row + 1, min(max_row, start_row + C_RANGE_ZERO_MAX_OFFSET) + 1):
+        q = sheet.range(f"{COL_Q}{row}").value
+        if _is_q_chain_flag(q):
+            break
+        if _is_stop_flag(q):
+            sheet.range(f"{COL_Q}{row}").value = None
+            print(f"  Cleared Q stop 0@{row} after completed C")
+
+
+def clear_completed_price_flags(sheet) -> None:
+    """Remove M2/M1/O/C flags whose destination price columns are fully populated."""
+    max_row = _sheet_max_row(sheet)
+    m2_rows: List[int] = []
+    m1_rows: List[int] = []
+    c_rows: List[int] = []
+    for row in range(HEADER_ROW + 1, max_row + 1):
+        q = sheet.range(f"{COL_Q}{row}").value
+        if _is_q_m2_flag(q):
+            m2_rows.append(row)
+        elif _is_q_m1_flag(q):
+            m1_rows.append(row)
+        elif _is_q_c_flag(q):
+            c_rows.append(row)
+
+    print("\nClearing completed price flags (dest columns full)...")
+    for row in m2_rows:
+        if _dest_range_complete(sheet, row, COL_V, max_row):
+            sheet.range(f"{COL_Q}{row}").value = None
+            print(f"  Cleared M2@{row} (V complete)")
+
+    for row in m1_rows:
+        if _dest_range_complete(sheet, row, COL_U, max_row) and _o_range_t_complete(
+            sheet, row, max_row
+        ):
+            sheet.range(f"{COL_Q}{row}").value = None
+            print(f"  Cleared M1@{row} (U/T complete)")
+            _clear_p_o_range(sheet, row, max_row)
+
+    for row in c_rows:
+        if not _c_range_has_ticker(sheet, row, max_row):
+            sheet.range(f"{COL_Q}{row}").value = None
+            _clear_q_zeros_after(sheet, row, max_row)
+            print(f"  Cleared terminator C@{row}")
+            continue
+        if _dest_range_complete(sheet, row, COL_S, max_row):
+            sheet.range(f"{COL_Q}{row}").value = None
+            _clear_q_zeros_after(sheet, row, max_row)
+            print(f"  Cleared C@{row} (S complete)")
+
+
+def resolve_flag_as_of_date(sheet, calendar_today: date) -> date:
+    """
+    Evening (opens+closes succeeded today AND dests filled):
+      as-of = next trading day.
+    Otherwise: as-of = calendar_today.
+    """
+    both_ok, opens_d, closes_d = opens_and_closes_succeeded_on(calendar_today)
+    prices_ok = _active_flag_dests_complete(sheet)
+    print("\nFlag as-of QC:")
+    print(f"  Calendar today: {calendar_today}")
+    print(f"  Get_Opens success date (MT): {opens_d}")
+    print(f"  Get_Closes success date (MT): {closes_d}")
+    print(f"  Opens+Closes both on today: {both_ok}")
+    print(f"  Active flag dests complete: {prices_ok}")
+
+    if both_ok and prices_ok:
+        as_of = next_trading_day(calendar_today)
+        print(f"  Evening mode -> place flags as-of next trading day: {as_of}")
+        return as_of
+
+    print(f"  Same-day/morning mode -> place flags as-of: {calendar_today}")
+    return calendar_today
+
 def flag_prices_full_auto(
     *,
     earnings_file: str = LATEST_EARNINGS_FILE,
     today: Optional[date] = None,
 ) -> None:
-    """Write P/Q flags for today's Full_Auto price jobs. No-op when nothing to flag."""
-    today = today or date.today()
-    if not is_trading_day(today):
-        print(f"Flag_Prices_Full_Auto: {today} is not a trading day; skip.")
+    """
+    Write P/Q flags for Full_Auto price jobs.
+
+    Evening (opens+closes succeeded today and dests filled): clear completed flags,
+    then place flags as-of the *next* trading day.
+    Morning / otherwise: place flags as-of calendar today (idempotent).
+    """
+    calendar_today = today or date.today()
+    if not is_trading_day(calendar_today):
+        print(f"Flag_Prices_Full_Auto: {calendar_today} is not a trading day; skip.")
         return
     if not os.path.exists(earnings_file):
         print(f"Flag_Prices_Full_Auto: earnings file not found: {earnings_file}")
         return
 
-    print(f"\nFlag_Prices_Full_Auto for {today}...")
+    print(f"\nFlag_Prices_Full_Auto (calendar {calendar_today})...")
     app = None
     wb = None
     owned_app = False
@@ -569,14 +1034,26 @@ def flag_prices_full_auto(
             print("  No Full_Auto earnings rows (M+K+Y); nothing to flag.")
             return
 
+        as_of = resolve_flag_as_of_date(sheet, calendar_today)
+        clear_completed_price_flags(sheet)
+
         trade_dates = sorted({r.trade_date for r in all_rows})
 
-        d_for_c = [d for d in trade_dates if d == today]
-        d_for_m1 = [d for d in trade_dates if add_trading_days(d, 1) == today]
-        d_for_m2 = [d for d in trade_dates if add_trading_days(d, 2) == today]
+        d_for_c = [d for d in trade_dates if d == as_of]
+        d_for_m1 = [d for d in trade_dates if add_trading_days(d, 1) == as_of]
+        d_for_m2 = [d for d in trade_dates if add_trading_days(d, 2) == as_of]
+
+        print(
+            f"\nPlacing flags as-of {as_of}: "
+            f"C days={d_for_c}, M1 days={d_for_m1}, M2 days={d_for_m2}"
+        )
 
         if not d_for_c and not d_for_m1 and not d_for_m2:
-            print(f"  No Full_Auto rows for C/M1/O/M2 jobs on {today}.")
+            print(f"  No Full_Auto rows for C/M1/O/M2 jobs as-of {as_of}.")
+            try:
+                wb.save()
+            except Exception:
+                pass
             return
 
         wrote_m2_last: List[int] = []
@@ -584,11 +1061,9 @@ def flag_prices_full_auto(
         wrote_c = False
         c_start_rows: List[int] = []
 
-        # Write C first so M1/O can place P's 0 on the C row without inventing a Q 0.
         for d in d_for_c:
             rows = _rows_for_trade_date(all_rows, d)
             groups = _contiguous_groups(rows)
-            # Snapshot empty-S starts before write (those become C rows).
             for g in groups:
                 idx = _first_empty_dest_index(sheet, g, COL_S)
                 if idx is not None:
@@ -617,24 +1092,25 @@ def flag_prices_full_auto(
                 dest_col=COL_T,
                 p_flag="O",
                 q_flag="M1",
-                job_label=f"O->T + M1->U (D={d}, D+1={today})",
+                job_label=f"O->T + M1->U (D={d}, D+1={as_of})",
             )
             if m1_rows:
                 wrote_m1 = True
 
-        # Re-assert C flags in case anything still tried to place a 0 on those rows.
         for row in sorted(set(c_start_rows)):
             if not _is_q_c_flag(sheet.range(f"{COL_Q}{row}").value):
                 sheet.range(f"{COL_Q}{row}").value = "C"
                 print(f"  Restored Q C@{row} after M1/M2 pass.")
 
-        # M2-only day: stop 0 only if it would not overwrite C/M1.
         if wrote_m2_last and not wrote_m1 and not wrote_c:
-            zero_row = max(wrote_m2_last) + 1
-            if _write_q_zero_safe(sheet, zero_row):
-                print(f"  M2-only: wrote Q 0@{zero_row} to end M2 range.")
+            _ensure_c_after_m2_if_needed(
+                sheet, max(wrote_m2_last), all_rows=all_rows, as_of=as_of
+            )
 
-        # Strict layout QC — fail the run if invariants are broken.
+        repair_q_layout_before_qc(
+            sheet, wrote_m2_last=wrote_m2_last, all_rows=all_rows, as_of=as_of
+        )
+
         validate_flag_layout_strict(sheet)
 
         try:
@@ -644,6 +1120,6 @@ def flag_prices_full_auto(
                 wb.save()
             except Exception as e:
                 print(f"  Warning: could not save earnings workbook after flagging: {e}")
-        print("Flag_Prices_Full_Auto: done.")
+        print(f"Flag_Prices_Full_Auto: done (as-of {as_of}).")
     finally:
         release_earnings_workbook(app, wb, owned_app=owned_app, owned_book=owned_book)
