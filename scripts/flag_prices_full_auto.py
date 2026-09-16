@@ -9,10 +9,13 @@ Price calendar (entry day D from M+K, trading days only):
   - today == D+2 -> Q: M2 at start (closes -> V)
 
 Required C (always, after date jobs):
-  - Place C on the first trade row above zz with blank column T (not yet entered).
+  - Morning / default: first trade row above zz with blank column T (not entered).
+  - Evening + open orders today: M1+O on today's weekday block; C on the first
+    trade row after that block.
   - Exception: no C when the last column-M weekday block above zz already starts
     with M1 or M2.
   - Q trailing 0 for C sits on the column-A zz end-of-trades row.
+  - Next trading day's Live_Trade_Info trades: paste column Z as values (lock size).
 
 Get_Closes_ToS Q chain: M2 until M1; M1 until C; C until 0.
   - O (column P) trailing 0 must sit on the same row as C (P=0, Q=C).
@@ -36,13 +39,22 @@ from typing import Any, List, Optional, Sequence
 from full_auto_utils import (
     add_trading_days,
     cell_has_value,
+    dow_abbrev_for_date,
     is_trading_day,
     next_trading_day,
     parse_earnings_date,
     parse_m_dow,
     resolve_trade_date,
 )
-from price_run_timestamps import opens_and_closes_succeeded_on
+from price_run_timestamps import (
+    open_trades_both_succeeded_on,
+    opens_and_closes_succeeded_on,
+)
+from live_trade_info_utils import (
+    live_info_has_trades_for_day,
+    read_live_trades_for_day,
+    write_live_trades_for_day,
+)
 from earnings_workbook_utils import (
     LATEST_EARNINGS_FILE,
     LATEST_EARNINGS_SHEET,
@@ -61,6 +73,11 @@ COL_U = "U"
 COL_V = "V"
 COL_S = "S"
 COL_Y = "Y"
+COL_Z = "Z"
+
+_SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+_BASE_DIR = os.path.dirname(_SCRIPT_DIR)
+LIVE_TRADE_INFO_FILE = os.path.join(_BASE_DIR, "Live_Trade_Info.xlsx")
 
 
 @dataclass
@@ -501,16 +518,39 @@ def _clear_trade_row_cs_except(sheet, keep_row: Optional[int] = None) -> None:
             print(f"  Cleared misplaced Q C@{row}")
 
 
-def ensure_required_c_flag(sheet) -> None:
+def _first_trade_row_after(sheet, after_row: int) -> Optional[int]:
+    """First M+ticker trade row strictly below after_row and above zz (not M1/M2)."""
+    zz = _find_zz_end_row(sheet, HEADER_ROW + 1)
+    end = (zz - 1) if zz is not None else _sheet_scan_max_row(sheet)
+    for row in range(after_row + 1, end + 1):
+        if parse_m_dow(sheet.range(f"{COL_M}{row}").value) is None:
+            continue
+        if not _normalize_ticker_cell(sheet.range(f"{COL_TICKER}{row}").value):
+            continue
+        q = sheet.range(f"{COL_Q}{row}").value
+        if _is_q_m1_flag(q) or _is_q_m2_flag(q):
+            continue
+        return row
+    return None
+
+
+def ensure_required_c_flag(
+    sheet,
+    *,
+    after_open_block_row: Optional[int] = None,
+) -> None:
     """
-    Always keep a trade-row C on the first unentered trade (blank column T),
-    except when the last M weekday block above zz is already M1 or M2.
+    Always keep a trade-row C, except when the last M weekday block above zz
+    is already M1 or M2.
+
+    Placement:
+      - Evening after open-trades: first trade row after the entered weekday block
+      - Otherwise: first unentered trade (blank column T)
 
     Closing Q 0 stays on the column-A zz row.
     """
-    print("\nEnsuring required C (first blank-T / unentered trade)...")
+    print("\nEnsuring required C...")
 
-    # Never leave a stop 0 on a trade row
     max_row = _sheet_scan_max_row(sheet)
     for row in range(HEADER_ROW + 1, max_row + 1):
         if _is_stop_flag(sheet.range(f"{COL_Q}{row}").value) and _row_is_trade_or_ticker(
@@ -527,24 +567,30 @@ def ensure_required_c_flag(sheet) -> None:
         _clear_trade_row_cs_except(sheet, keep_row=None)
         return
 
-    c_at = _first_unentered_trade_row(sheet)
+    if after_open_block_row is not None:
+        c_at = _first_trade_row_after(sheet, after_open_block_row)
+        reason = f"first trade after open block ending @{after_open_block_row}"
+    else:
+        c_at = _first_unentered_trade_row(sheet)
+        reason = "first unentered trade: blank T"
+
     if c_at is None:
-        print("  No blank-T trade row above zz; cannot place required C.")
+        print(f"  No row found for required C ({reason}).")
         return
 
     _clear_trade_row_cs_except(sheet, keep_row=c_at)
 
     if not _is_q_c_flag(sheet.range(f"{COL_Q}{c_at}").value):
         sheet.range(f"{COL_Q}{c_at}").value = "C"
-        print(f"  Placed Q C@{c_at} (first unentered trade: blank T)")
+        print(f"  Placed Q C@{c_at} ({reason})")
     else:
-        print(f"  Q C already at @{c_at} (first unentered trade)")
+        print(f"  Q C already at @{c_at} ({reason})")
 
     _place_q_zero_after_c(sheet, c_at)
 
 
 def _m1_is_terminal_trade_block(sheet) -> bool:
-    """Backward-compatible name: last weekday block is M1 or M2. """
+    """ Backward-compatible name: last weekday block is M1 or M2. """
     return _last_weekday_block_is_m1_or_m2(sheet)
 
 
@@ -572,6 +618,175 @@ def repair_q_layout_before_qc(
     """Final C layout: first blank-T trade, unless last block is M1/M2."""
     del wrote_m2_last, all_rows, as_of
     ensure_required_c_flag(sheet)
+
+
+def _is_evening_flag_mode(sheet, calendar_today: date) -> bool:
+    both_ok, _, _ = opens_and_closes_succeeded_on(calendar_today)
+    return both_ok and _active_flag_dests_complete(sheet)
+
+
+def _evening_open_orders_ready(calendar_today: date) -> bool:
+    """
+    Evening-only gate for promoting today's entries to M1+O:
+      both Open_Trades_ToS and Open_Trade_ToS2 succeeded today with trades,
+      and Live_Trade_Info still has trades on today's date sheet.
+    """
+    both_ok, d1, d2 = open_trades_both_succeeded_on(calendar_today)
+    live_ok = live_info_has_trades_for_day(LIVE_TRADE_INFO_FILE, calendar_today)
+    print("\nEvening open-orders QC:")
+    print(f"  Open_Trades_ToS success date (MT): {d1}")
+    print(f"  Open_Trade_ToS2 success date (MT): {d2}")
+    print(f"  Both open scripts succeeded with trades today: {both_ok}")
+    print(f"  Live_Trade_Info has trades for {calendar_today}: {live_ok}")
+    return both_ok and live_ok
+
+
+def place_evening_entered_trade_flags(
+    sheet,
+    all_rows: Sequence[EarningsRow],
+    calendar_today: date,
+) -> Optional[int]:
+    """
+    After market close (evening mode + open orders today):
+      M1 + O on calendar-today's weekday earnings block(s).
+    Returns the last row of the last such block (C goes on the next trade row).
+    """
+    token = dow_abbrev_for_date(calendar_today)
+    groups = [
+        g
+        for g in _contiguous_groups(all_rows)
+        if g[0].trade_date == calendar_today and g[0].m_token == token
+    ]
+    if not groups:
+        groups = [
+            g for g in _contiguous_groups(all_rows) if g[0].m_token == token
+        ]
+    if not groups:
+        print(
+            f"  Evening open-trades: no earnings groups with M={token} "
+            f"for {calendar_today}; skip M1/O."
+        )
+        return None
+
+    print(
+        f"\nEvening open-trades: placing M1+O for entered block(s) "
+        f"M={token} D={calendar_today}..."
+    )
+    max_row = _sheet_max_row(sheet)
+    last_end: Optional[int] = None
+    for g in groups:
+        start_row = g[0].row
+        last_data_row = g[-1].row
+        tickers = ", ".join(r.ticker for r in g)
+        # Force M1+O even if T already has values (orders already live).
+        if _is_q_c_flag(sheet.range(f"{COL_Q}{start_row}").value):
+            sheet.range(f"{COL_Q}{start_row}").value = None
+        c_row = _ensure_c_row_for_m1_o(
+            sheet,
+            m1_start_row=start_row,
+            last_data_row=last_data_row,
+            max_row=max_row,
+        )
+        _write_q_start_only(sheet, "M1", start_row)
+        z_p = _write_o_range(sheet, start_row, c_row)
+        print(
+            f"  Evening O@{start_row} 0@{z_p}; Q M1@{start_row} ends at C@{c_row}; "
+            f"tickers: {tickers}"
+        )
+        last_end = last_data_row
+    return last_end
+
+
+def lock_share_sizes_for_next_trading_day(
+    sheet,
+    all_rows: Sequence[EarningsRow],
+    calendar_today: date,
+) -> None:
+    """
+    For next trading day's planned trades (Live_Trade_Info guide):
+      paste column Z as values so share size is locked (no formula).
+
+    If Live_Trade_Info has no tomorrow sheet/trades yet, write them from
+    earnings rows with trade_date == tomorrow (using evaluated Z), then lock.
+    """
+    tomorrow = next_trading_day(calendar_today)
+    print(f"\nLocking Z share sizes for next trading day {tomorrow}...")
+
+    tomorrow_earnings = [r for r in all_rows if r.trade_date == tomorrow]
+    if not tomorrow_earnings:
+        print(f"  No earnings rows with trade_date={tomorrow}; skip Z lock.")
+        return
+
+    live_pairs = read_live_trades_for_day(LIVE_TRADE_INFO_FILE, tomorrow)
+    live_keys = {(t, d) for t, d in live_pairs}
+
+    if not live_keys:
+        print(
+            f"  Live_Trade_Info has no trades for {tomorrow}; "
+            f"writing {len(tomorrow_earnings)} trade(s) from earnings, then locking Z."
+        )
+        # Evaluate Z first, then write Live_Trade_Info with numeric sizes
+        to_write = []
+        for r in tomorrow_earnings:
+            direction = _normalize_direction(sheet.range(f"{COL_Y}{r.row}").value)
+            if direction not in ("long", "short"):
+                print(f"  Skip row {r.row} {r.ticker}: bad direction")
+                continue
+            z_cell = sheet.range(f"{COL_Z}{r.row}")
+            val = z_cell.value
+            try:
+                size_num = int(round(float(val)))
+            except (TypeError, ValueError):
+                print(f"  Skip row {r.row} {r.ticker}: Z not numeric ({val!r})")
+                continue
+            to_write.append((r.ticker, direction, size_num))
+            live_keys.add((r.ticker, direction))
+        if to_write:
+            try:
+                sheet_name = write_live_trades_for_day(
+                    LIVE_TRADE_INFO_FILE, tomorrow, to_write
+                )
+                print(f"  Wrote {len(to_write)} trade(s) to Live_Trade_Info '{sheet_name}'.")
+            except Exception as e:
+                print(f"  Warning: could not write Live_Trade_Info for {tomorrow}: {e}")
+        else:
+            print("  Nothing to write/lock for tomorrow.")
+            return
+    else:
+        print(
+            f"  Live_Trade_Info guide: {len(live_keys)} trade(s) for {tomorrow}; "
+            f"locking matching earnings Z cells."
+        )
+
+    locked = 0
+    for r in tomorrow_earnings:
+        direction = _normalize_direction(sheet.range(f"{COL_Y}{r.row}").value)
+        if (r.ticker, direction) not in live_keys:
+            continue
+        z_cell = sheet.range(f"{COL_Z}{r.row}")
+        try:
+            formula = z_cell.formula
+        except Exception:
+            formula = None
+        val = z_cell.value
+        if val is None or str(val).strip() == "":
+            print(f"  Skip Z{r.row} {r.ticker}: empty")
+            continue
+        try:
+            size_num = int(round(float(val)))
+        except (TypeError, ValueError):
+            print(f"  Skip Z{r.row} {r.ticker}: cannot coerce {val!r}")
+            continue
+
+        has_formula = isinstance(formula, str) and formula.startswith("=")
+        if has_formula or z_cell.value != size_num:
+            z_cell.value = size_num
+            print(f"  Locked Z{r.row} {r.ticker} ({direction}) = {size_num}")
+            locked += 1
+        else:
+            print(f"  Z{r.row} {r.ticker} already locked value {size_num}")
+
+    print(f"  Z lock complete: {locked} cell(s) pasted as values.")
 
 
 def validate_flag_layout_strict(sheet) -> None:
@@ -985,7 +1200,19 @@ def flag_prices_full_auto(
             return
 
         as_of = resolve_flag_as_of_date(sheet, calendar_today)
+        evening = _is_evening_flag_mode(sheet, calendar_today)
         clear_completed_price_flags(sheet)
+
+        open_block_end: Optional[int] = None
+        if evening and _evening_open_orders_ready(calendar_today):
+            open_block_end = place_evening_entered_trade_flags(
+                sheet, all_rows, calendar_today
+            )
+        elif evening:
+            print(
+                "  Evening mode but open-orders gate not met; "
+                "skipping entered-day M1/O promotion."
+            )
 
         trade_dates = sorted({r.trade_date for r in all_rows})
 
@@ -1041,7 +1268,9 @@ def flag_prices_full_auto(
                     sheet.range(f"{COL_Q}{row}").value = "C"
                     print(f"  Restored Q C@{row} after M1/M2 pass.")
 
-        ensure_required_c_flag(sheet)
+        ensure_required_c_flag(sheet, after_open_block_row=open_block_end)
+
+        lock_share_sizes_for_next_trading_day(sheet, all_rows, calendar_today)
 
         validate_flag_layout_strict(sheet)
 

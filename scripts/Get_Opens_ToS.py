@@ -13,7 +13,6 @@ Workbook logic (Trades sheet):
 """
 
 import os
-import sys
 import time
 from typing import Dict, List, Optional, Tuple
 
@@ -168,9 +167,6 @@ def main() -> None:
                 count_o += 1
             elif _is_stop_flag(cell_val):
                 count_zero += 1
-        if count_o != 1 or count_zero != 1:
-            print("One clean range is not selected, please clean up your open range and try again.")
-            sys.exit(0)
 
         first_o_row = None
         for row in range(start_row, max_row + 1):
@@ -179,9 +175,16 @@ def main() -> None:
                 first_o_row = row
                 break
 
+        # Successful run with nothing to write still stamps (evening QC needs today's opens stamp).
         if first_o_row is None:
             print("No 'O' flag found in column P. Nothing to process.")
-            sys.exit(0)
+            if not DRY_RUN:
+                write_opens_success()
+            return
+
+        if count_o != 1 or count_zero != 1:
+            print("One clean range is not selected, please clean up your open range and try again.")
+            return
 
         to_process: List[Tuple[int, str]] = []
         for row in range(first_o_row, max_row + 1):
@@ -195,7 +198,9 @@ def main() -> None:
 
         if not to_process:
             print("No tickers found in rows between 'O' and '0' in column P.")
-            sys.exit(0)
+            if not DRY_RUN:
+                write_opens_success()
+            return
 
         tickers_to_fetch = [t for _, t in to_process]
         print(f"Fetching opening prices for {len(tickers_to_fetch)} ticker(s) from Schwab daily candles...")
@@ -215,7 +220,10 @@ def main() -> None:
             print("DRY_RUN is True: no workbook writes were made.")
         else:
             wb.save()
-            print("Opening prices written to Latest Earnings (saved via Excel).")
+            if written:
+                print("Opening prices written to Latest Earnings (saved via Excel).")
+            else:
+                print("Get_Opens completed with no prices written (fetch miss); still recording success.")
             write_opens_success()
 
         print(

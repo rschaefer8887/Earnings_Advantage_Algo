@@ -28,6 +28,7 @@ from typing import List, Tuple
 from openpyxl import load_workbook
 
 from live_trade_info_utils import get_trade_sheet_name
+from price_run_timestamps import write_open_trades_tos_success
 from Schwab_Auth import create_client
 
 try:
@@ -169,13 +170,20 @@ def main() -> None:
         return
 
     print(f"\nPlacing orders to Schwab account {account_id} ...")
+    submitted = 0
     for ticker, direction, size, ob in orders:
         try:
             order_spec = ob.build()
             resp = client.place_order(account_id, order_spec)
             print(f"Submitted {direction} {size} {ticker}, response: {resp.status_code if hasattr(resp, 'status_code') else resp}")
+            submitted += 1
         except Exception as e:
             print(f"Error placing order for {ticker}: {e}")
+
+    if submitted > 0:
+        write_open_trades_tos_success(trade_count=len(trades))
+    else:
+        print("No orders submitted successfully; open-trades success stamp not written.")
 
 
 if __name__ == "__main__":
