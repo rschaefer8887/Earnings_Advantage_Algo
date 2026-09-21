@@ -15,7 +15,8 @@ Required C (always, after date jobs):
   - Exception: no C when the last column-M weekday block above zz already starts
     with M1 or M2.
   - Q trailing 0 for C sits on the column-A zz end-of-trades row.
-  - Next trading day's Live_Trade_Info trades: paste column Z as values (lock size).
+  - Evening only: next trading day's Live_Trade_Info trades — paste column Z as values
+    (lock share size). Skipped on morning / same-day Stage runs.
 
 Get_Closes_ToS Q chain: M2 until M1; M1 until C; C until 0.
   - O (column P) trailing 0 must sit on the same row as C (P=0, Q=C).
@@ -703,8 +704,8 @@ def lock_share_sizes_for_next_trading_day(
     calendar_today: date,
 ) -> None:
     """
-    For next trading day's planned trades (Live_Trade_Info guide):
-      paste column Z as values so share size is locked (no formula).
+    Evening-only: for next trading day's planned trades (Live_Trade_Info guide),
+    paste column Z as values so share size is locked (no formula).
 
     If Live_Trade_Info has no tomorrow sheet/trades yet, write them from
     earnings rows with trade_date == tomorrow (using evaluated Z), then lock.
@@ -1270,7 +1271,13 @@ def flag_prices_full_auto(
 
         ensure_required_c_flag(sheet, after_open_block_row=open_block_end)
 
-        lock_share_sizes_for_next_trading_day(sheet, all_rows, calendar_today)
+        if evening:
+            lock_share_sizes_for_next_trading_day(sheet, all_rows, calendar_today)
+        else:
+            print(
+                "\nSkipping Z share-size lock (morning/same-day mode; "
+                "lock only runs after market close / evening mode)."
+            )
 
         validate_flag_layout_strict(sheet)
 
