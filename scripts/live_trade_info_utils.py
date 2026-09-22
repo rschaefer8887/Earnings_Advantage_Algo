@@ -45,21 +45,55 @@ def _read_trade_mode_cell(file_path: str) -> Any:
         try:
             import xlwings as xw  # type: ignore
 
-            app = xw.App(visible=False)
+            abs_path = os.path.abspath(file_path)
+            # Prefer an already-open workbook (no new Excel).
             wb = None
+            owned_app = False
+            owned_book = False
+            app = None
             try:
-                wb = app.books.open(file_path)
+                for existing in getattr(xw.books, "__iter__", lambda: [])():
+                    try:
+                        if os.path.normcase(os.path.abspath(existing.fullname)) == os.path.normcase(
+                            abs_path
+                        ):
+                            wb = existing
+                            break
+                    except Exception:
+                        continue
+                if wb is None:
+                    try:
+                        for a in xw.apps:
+                            for existing in a.books:
+                                try:
+                                    if os.path.normcase(
+                                        os.path.abspath(existing.fullname)
+                                    ) == os.path.normcase(abs_path):
+                                        wb = existing
+                                        break
+                                except Exception:
+                                    continue
+                            if wb is not None:
+                                break
+                    except Exception:
+                        pass
+                if wb is None:
+                    app = xw.App(visible=False)
+                    owned_app = True
+                    wb = app.books.open(file_path)
+                    owned_book = True
                 value = wb.sheets[TRADE_MODE_SHEET].range(TRADE_MODE_CELL).value
             finally:
-                if wb is not None:
+                if owned_book and wb is not None:
                     try:
                         wb.close()
                     except Exception:
                         pass
-                try:
-                    app.quit()
-                except Exception:
-                    pass
+                if owned_app and app is not None:
+                    try:
+                        app.quit()
+                    except Exception:
+                        pass
         except Exception:
             value = None
     return value

@@ -151,16 +151,27 @@ def _find_open_xlwings_book(earnings_file: str) -> Any:
     import xlwings as xw
 
     abs_path = os.path.abspath(earnings_file)
-    for book in xw.books:
-        try:
-            if _same_workbook_path(book.fullname, abs_path):
-                return book
-        except Exception:
-            continue
+    # Prefer already-running Excel instances (do not start a new App yet).
     try:
-        return xw.Book(abs_path)
+        for app in xw.apps:
+            for book in app.books:
+                try:
+                    if _same_workbook_path(book.fullname, abs_path):
+                        return book
+                except Exception:
+                    continue
     except Exception:
-        return None
+        pass
+    try:
+        for book in xw.books:
+            try:
+                if _same_workbook_path(book.fullname, abs_path):
+                    return book
+            except Exception:
+                continue
+    except Exception:
+        pass
+    return None
 
 
 def _read_columns_xlwings(
@@ -182,10 +193,11 @@ def _read_columns_xlwings(
     app = None
 
     if wb is None:
+        # File not already open — start a short-lived hidden Excel only as last resort.
         app = xw.App(visible=False)
         owned_app = True
         try:
-            wb = app.books.open(abs_path, read_only=True)
+            wb = app.books.open(abs_path, update_links=False, read_only=True)
             owned_book = True
         except Exception as e:
             try:
@@ -265,7 +277,8 @@ def read_exit_types_from_latest_earnings(
     - If the same ticker appears multiple times in the filtered range, last one wins.
 
     Uses openpyxl when the file is not open in Excel; uses xlwings when the
-    workbook is already open (Windows file lock).
+    workbook is already open (Windows file lock). Prefer attaching to an existing
+    Excel instance over starting a new one.
     """
     if not os.path.exists(earnings_file):
         raise FileNotFoundError(f"Latest earnings file not found: {earnings_file}")
@@ -274,7 +287,7 @@ def read_exit_types_from_latest_earnings(
         o_vals, a_vals, aa_vals, ab_vals = _read_columns_openpyxl(
             earnings_file, earnings_sheet
         )
-    except PermissionError:
+    except (PermissionError, OSError, IOError):
         try:
             o_vals, a_vals, aa_vals, ab_vals = _read_columns_xlwings(
                 earnings_file, earnings_sheet
