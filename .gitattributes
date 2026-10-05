@@ -1,0 +1,17 @@
+# Normalize text files to LF in the repo (quieter diffs on Windows).
+* text=auto eol=lf
+
+# Keep Office / binary assets untouched.
+*.xlsx binary
+*.xls binary
+*.xlsm binary
+*.pdf binary
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.zip binary
+*.exe binary
+*.dll binary
+*.pkl binary
+*.parquet binary
