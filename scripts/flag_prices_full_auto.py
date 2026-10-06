@@ -15,8 +15,9 @@ Required C (always, after date jobs):
   - Exception: no C when the last column-M weekday block above zz already starts
     with M1 or M2.
   - Q trailing 0 for C: on zz if (zz - last T open, or zz - row 4 if T empty) <= 50;
-    else on the row after the M-block for calendar today through +5 trading days
-    (6 sessions; holidays skipped), capped at 120 rows below C. Get_Closes stops at that 0.
+    else on the row after the M-block for calendar today through +6 trading days
+    (7 sessions; holidays skipped), at least 60 rows below C when C is on rows
+    4–175, capped at 120 rows below C. Get_Closes stops at that 0.
   - Evening only: next trading day's Live_Trade_Info trades — paste column Z as values
     (lock share size). Skipped on morning / same-day Stage runs.
 
@@ -264,8 +265,12 @@ def _clear_stale_q_stop_after_block(sheet, last_data_row: int) -> None:
 C_RANGE_ZERO_MAX_OFFSET = 500
 # If zz is this many rows (or fewer) past the last T open (or C), put Q 0 on zz.
 ZZ_GAP_USE_ZZ_MAX = 50
-# Inclusive trading-day window for mid-sheet C-range end (Mon..next Mon = 6).
-C_RANGE_TRADING_DAY_WINDOW = 6
+# Inclusive trading-day window for mid-sheet C-range end (e.g. Wed..next Thu = 7).
+C_RANGE_TRADING_DAY_WINDOW = 7
+# When C is early on the sheet, Q 0 must be at least this many rows below C.
+C_RANGE_ZERO_MIN_ROWS_BELOW_C = 60
+# Apply the 60-row minimum only while C is in this inclusive row band.
+C_RANGE_ZERO_MIN_C_ROW_MAX = 175
 # Hard cap: mid-sheet Q 0 never more than this many rows below C (busy earnings weeks).
 C_RANGE_ZERO_MAX_ROWS_BELOW_C = 120
 
@@ -335,7 +340,7 @@ def _last_row_for_trade_date(
     return last
 
 
-def _end_row_for_six_trading_day_window(
+def _end_row_for_trading_day_window(
     sheet,
     *,
     c_row: int,
@@ -343,7 +348,8 @@ def _end_row_for_six_trading_day_window(
     today: date,
 ) -> Optional[Tuple[int, date]]:
     """
-    Last included trade row for calendar today through +5 trading days (6 sessions).
+    Last included trade row for calendar today through +(N-1) trading days
+    (N = C_RANGE_TRADING_DAY_WINDOW, currently 7 sessions).
 
     Trading days with no stocks still count toward the window length; the row
     range only includes sheet rows whose M+K trade_date falls in [start, target].
@@ -397,8 +403,8 @@ def _resolve_q_zero_row_after_c(
 
     - gap = zz - last_T (or zz - row 4 if T is empty — new sheet only)
     - gap <= 50 -> zz (allow_on_trade_row=False)
-    - gap > 50  -> row after the M-block for the 6-trading-day window,
-      capped at C + 120 (allow_on_trade_row=True when that row is a ticker)
+    - gap > 50  -> row after the M-block for the 7-trading-day window,
+      floored at C+60 when C is on rows 4–175, capped at C+120
     """
     calendar_today = today or date.today()
     zz_row = _find_zz_end_row(sheet, HEADER_ROW + 1)
@@ -407,6 +413,9 @@ def _resolve_q_zero_row_after_c(
     # Empty T means a brand-new sheet; always measure from first data row (4).
     anchor = last_t if last_t is not None else (HEADER_ROW + 1)
     max_zero_by_c = c_row + C_RANGE_ZERO_MAX_ROWS_BELOW_C
+    min_zero_by_c: Optional[int] = None
+    if (HEADER_ROW + 1) <= c_row <= C_RANGE_ZERO_MIN_C_ROW_MAX:
+        min_zero_by_c = c_row + C_RANGE_ZERO_MIN_ROWS_BELOW_C
 
     if zz_row is not None:
         gap = zz_row - anchor
@@ -417,46 +426,51 @@ def _resolve_q_zero_row_after_c(
             )
             return zz_row, False
 
-        window = _end_row_for_six_trading_day_window(
+        window = _end_row_for_trading_day_window(
             sheet, c_row=c_row, zz_row=zz_row, today=calendar_today
         )
         if window is not None:
             last_included, target_d = window
             zero_row = last_included + 1
-            capped = False
+            notes: List[str] = []
+            if min_zero_by_c is not None and zero_row < min_zero_by_c:
+                zero_row = min_zero_by_c
+                notes.append(f"min C+{C_RANGE_ZERO_MIN_ROWS_BELOW_C}")
             if zero_row > max_zero_by_c:
                 zero_row = max_zero_by_c
-                capped = True
+                notes.append(f"capped C+{C_RANGE_ZERO_MAX_ROWS_BELOW_C}")
             if zero_row >= zz_row:
                 print(
-                    f"  Q0 resolve: gap {gap}; 6-day window ends @{last_included} "
-                    f"(D={target_d}) but next/cap row is zz -> zz@{zz_row}"
+                    f"  Q0 resolve: gap {gap}; {C_RANGE_TRADING_DAY_WINDOW}-day "
+                    f"window ends @{last_included} (D={target_d}) but next/cap "
+                    f"row is zz -> zz@{zz_row}"
                 )
                 return zz_row, False
-            cap_note = (
-                f", capped at C+{C_RANGE_ZERO_MAX_ROWS_BELOW_C}"
-                if capped
-                else ""
-            )
+            note_txt = f" ({', '.join(notes)})" if notes else ""
             print(
                 f"  Q0 resolve: gap {gap} > {ZZ_GAP_USE_ZZ_MAX}; "
-                f"6-trading-day window through {target_d} "
-                f"ends @{last_included} -> 0@{zero_row}{cap_note}"
+                f"{C_RANGE_TRADING_DAY_WINDOW}-trading-day window through {target_d} "
+                f"ends @{last_included} -> 0@{zero_row}{note_txt}"
             )
             allow = _row_is_trade_or_ticker(sheet, zero_row)
             return zero_row, allow
 
-        # No in-window block: still respect the 120-row cap before falling back to zz.
-        if max_zero_by_c < zz_row:
+        # No in-window block: early C -> min floor; else 120-row cap; then zz.
+        fallback = min_zero_by_c if min_zero_by_c is not None else max_zero_by_c
+        if fallback > max_zero_by_c:
+            fallback = max_zero_by_c
+        if fallback < zz_row:
             print(
-                f"  Q0 resolve: gap {gap} but no M-block for 6-day window; "
-                f"using C+{C_RANGE_ZERO_MAX_ROWS_BELOW_C} -> 0@{max_zero_by_c}"
+                f"  Q0 resolve: gap {gap} but no M-block for "
+                f"{C_RANGE_TRADING_DAY_WINDOW}-day window; "
+                f"using row {fallback} -> 0@{fallback}"
             )
-            allow = _row_is_trade_or_ticker(sheet, max_zero_by_c)
-            return max_zero_by_c, allow
+            allow = _row_is_trade_or_ticker(sheet, fallback)
+            return fallback, allow
 
         print(
-            f"  Q0 resolve: gap {gap} but no M-block for 6-day window; "
+            f"  Q0 resolve: gap {gap} but no M-block for "
+            f"{C_RANGE_TRADING_DAY_WINDOW}-day window; "
             f"falling back to zz@{zz_row}"
         )
         return zz_row, False
@@ -490,8 +504,8 @@ def _clear_stale_q_zeros_after(sheet, after_row: int) -> None:
 
 def _place_q_zero_after_c(sheet, c_row: int, *, today: Optional[date] = None) -> int:
     """
-    Write the Q 0 that closes the C range (zz when near end, else 6-trading-day
-    window capped at 120 rows below C). Clears stale 0s between C and terminator.
+    Write the Q 0 that closes the C range (zz when near end, else 7-trading-day
+    window with 60-row min when C is early, 120-row max). Clears stale 0s.
     """
     zero_row, allow_trade = _resolve_q_zero_row_after_c(sheet, c_row, today=today)
     _clear_stale_q_zeros_between(sheet, c_row, zero_row)
@@ -503,7 +517,7 @@ def _place_q_zero_after_c(sheet, c_row: int, *, today: Optional[date] = None) ->
 
 
 def _write_q_c_range(sheet, start_row: int, last_data_row: int) -> int:
-    """Column Q: C at start; 0 via zz / 6-trading-day rule."""
+    """Column Q: C at start; 0 via zz / 7-trading-day rule."""
     for r in range(start_row, last_data_row + 1):
         sheet.range(f"{COL_Q}{r}").value = None
     sheet.range(f"{COL_Q}{start_row}").value = "C"
@@ -522,7 +536,7 @@ def _ensure_c_row_for_m1_o(
 
     - Prefer an existing C below the M1 data rows.
     - If none, write C at last_data_row+1 (never leave that cell as Q 0).
-    - Place Q stop 0 after C via zz / 6-trading-day rule.
+    - Place Q stop 0 after C via zz / 7-trading-day rule.
     Returns the C row (same row as P's closing 0).
     """
     c_row = _find_next_c_row(sheet, last_data_row + 1, max_row)
@@ -716,7 +730,7 @@ def ensure_required_c_flag(
       - Evening after open-trades: first trade row after the entered weekday block
       - Otherwise: first unentered trade (blank column T)
 
-    Closing Q 0: zz when near end of sheet, else after 6-trading-day M-block.
+    Closing Q 0: zz when near end of sheet, else after 7-trading-day M-block.
     """
     print("\nEnsuring required C...")
 
