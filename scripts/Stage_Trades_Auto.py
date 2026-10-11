@@ -4,11 +4,13 @@ Stage Trades Auto — Build Live_Trade_Info from Latest Earnings
 Modes (Live_Trade_Info Trade_Mode!C3):
   - Single Day / weekday (legacy): column O flags
       "T" → Daily_Trades; "1"–"5" → Monday–Friday sheets.
-  - Full_Auto: ignore O; use columns M + K + Y. Stage from the first trade-row
-      C in column Q (M has a day flag) downward; if none, fall back to first M1.
+  - Full_Auto: ignore O; use columns M + K + Y (+ AC). Stage from the first
+      trade-row C in column Q downward; if none, fall back to first M1.
       After staging, runs price flagging in-process (scheduler unchanged).
 
-For each staged row: ticker A, direction Y, size Z, IBKR Exit AB, ToS Exit AA.
+Live_Trade_Info per staged row:
+  A ticker, B Direction (ToS_Open) from Y, C Share Size (Z),
+  D ToS_Open_Exit (AB), E ToS Exit (AA), F Direction (ToS) from AC.
 """
 
 import os
@@ -51,7 +53,8 @@ COL_TICKER = "A"
 COL_K = "K"
 COL_M = "M"
 COL_Q = "Q"
-COL_DIRECTION = "Y"
+COL_DIRECTION_IBKR = "Y"   # Live_Trade_Info B (IBKR / ToS2)
+COL_DIRECTION_TOS = "AC"   # Live_Trade_Info F (ToS primary)
 COL_SIZE = "Z"
 COL_IBKR_EXIT = "AB"   # Source for Live_Trade_Info column D
 COL_TOS_EXIT = "AA"    # Source for Live_Trade_Info column E
@@ -59,8 +62,10 @@ COL_TOS_EXIT = "AA"    # Source for Live_Trade_Info column E
 OUTPUT_FILE = os.path.join(_BASE_DIR, "Live_Trade_Info.xlsx")
 DAILY_SHEET = "Daily_Trades"
 WEEKDAY_SHEETS = ("Monday", "Tuesday", "Wednesday", "Thursday", "Friday")
-HEADER_D1 = "IBKR Exit"
+HEADER_B1 = "Direction (ToS_Open)"
+HEADER_D1 = "ToS_Open_Exit"
 HEADER_E1 = "ToS Exit"
+HEADER_F1 = "Direction (ToS)"
 
 # Column O: 1 -> Monday, 2 -> Tuesday, 3 -> Wednesday, 4 -> Thursday, 5 -> Friday
 _FLAG_TO_WEEKDAY = {1: "Monday", 2: "Tuesday", 3: "Wednesday", 4: "Thursday", 5: "Friday"}
@@ -104,31 +109,33 @@ def _cell_to_str(cell_value: Any) -> str:
     return str(cell_value).strip()
 
 
-# Trade tuple: (ticker, direction, size, ibkr_exit, tos_exit)
-TradeRow = Tuple[str, str, Any, str, str]
+# Trade tuple: (ticker, direction_ibkr, size, ibkr_exit, tos_exit, direction_tos)
+TradeRow = Tuple[str, str, Any, str, str, str]
 
 
 def _write_trades_to_sheet(ws: Worksheet, trades: List[TradeRow]) -> None:
     """Write header row and trade rows to sheet (same format as Daily_Trades)."""
     ws["A1"] = "Ticker"
-    ws["B1"] = "Direction"
+    ws["B1"] = HEADER_B1
     ws["C1"] = "Share Size"
     ws["D1"] = HEADER_D1
     ws["E1"] = HEADER_E1
+    ws["F1"] = HEADER_F1
     if ws.max_row > 1:
         ws.delete_rows(2, ws.max_row - 1)
-    for ticker, direction, size, ibkr_exit, tos_exit in trades:
+    for ticker, direction_ibkr, size, ibkr_exit, tos_exit, direction_tos in trades:
         next_row = ws.max_row + 1
         ws.cell(row=next_row, column=1, value=ticker)
-        ws.cell(row=next_row, column=2, value=direction)
+        ws.cell(row=next_row, column=2, value=direction_ibkr)
         ws.cell(row=next_row, column=3, value=size)
         ws.cell(row=next_row, column=4, value=ibkr_exit or None)
         ws.cell(row=next_row, column=5, value=tos_exit or None)
+        ws.cell(row=next_row, column=6, value=direction_tos)
     left_align = Alignment(horizontal="left")
-    for col in range(1, 6):
+    for col in range(1, 7):
         ws.cell(row=1, column=col).alignment = left_align
     for row in range(2, ws.max_row + 1):
-        for col in range(1, 6):
+        for col in range(1, 7):
             ws.cell(row=row, column=col).alignment = left_align
 
 
@@ -181,7 +188,7 @@ def _resolve_full_auto_stage_start(ws_source, max_row: int) -> Optional[tuple]:
 
 
 def _stage_full_auto(ws_source) -> None:
-    """Stage M+K+Y from first trade-row C (or M1 fallback) downward."""
+    """Stage M+K+Y+AC from first trade-row C (or M1 fallback) downward."""
     max_row = ws_source.max_row
     by_sheet: Dict[str, List[TradeRow]] = defaultdict(list)
 
@@ -196,7 +203,12 @@ def _stage_full_auto(ws_source) -> None:
         for row in range(start_row, max_row + 1):
             m_token = parse_m_dow(ws_source[f"{COL_M}{row}"].value)
             k_date = parse_earnings_date(ws_source[f"{COL_K}{row}"].value)
-            direction = _normalize_direction(ws_source[f"{COL_DIRECTION}{row}"].value)
+            direction_ibkr = _normalize_direction(
+                ws_source[f"{COL_DIRECTION_IBKR}{row}"].value
+            )
+            direction_tos = _normalize_direction(
+                ws_source[f"{COL_DIRECTION_TOS}{row}"].value
+            )
             ticker = _normalize_ticker(ws_source[f"{COL_TICKER}{row}"].value)
             size = ws_source[f"{COL_SIZE}{row}"].value
             ibkr_exit = _cell_to_str(ws_source[f"{COL_IBKR_EXIT}{row}"].value)
@@ -207,7 +219,13 @@ def _stage_full_auto(ws_source) -> None:
             if not ticker:
                 print(f"Row {row}: missing ticker; skipping.")
                 continue
-            if direction not in ("long", "short"):
+            if direction_ibkr not in ("long", "short"):
+                continue
+            if direction_tos not in ("long", "short"):
+                print(
+                    f"Row {row}: missing/invalid ToS direction (AC) for ticker "
+                    f"{ticker}; skipping."
+                )
                 continue
             if size is None or str(size).strip() == "":
                 print(f"Row {row}: missing share size for ticker {ticker}; skipping.")
@@ -215,7 +233,9 @@ def _stage_full_auto(ws_source) -> None:
 
             trade_date = resolve_trade_date(m_token, k_date)
             sheet_name = sheet_name_for_trade_date(trade_date, m_token)
-            by_sheet[sheet_name].append((ticker, direction, size, ibkr_exit, tos_exit))
+            by_sheet[sheet_name].append(
+                (ticker, direction_ibkr, size, ibkr_exit, tos_exit, direction_tos)
+            )
 
     if not by_sheet:
         print("Full_Auto: no eligible trades to stage (from C/M1 start downward).")
@@ -264,13 +284,15 @@ def _stage_legacy(ws_source) -> None:
             continue
 
         raw_ticker = ws_source[f"{COL_TICKER}{row}"].value
-        raw_direction = ws_source[f"{COL_DIRECTION}{row}"].value
+        raw_direction_ibkr = ws_source[f"{COL_DIRECTION_IBKR}{row}"].value
+        raw_direction_tos = ws_source[f"{COL_DIRECTION_TOS}{row}"].value
         raw_size = ws_source[f"{COL_SIZE}{row}"].value
         raw_ibkr_exit = ws_source[f"{COL_IBKR_EXIT}{row}"].value
         raw_tos_exit = ws_source[f"{COL_TOS_EXIT}{row}"].value
 
         ticker = _normalize_ticker(raw_ticker)
-        direction = _normalize_direction(raw_direction)
+        direction_ibkr = _normalize_direction(raw_direction_ibkr)
+        direction_tos = _normalize_direction(raw_direction_tos)
         size = raw_size
         ibkr_exit = _cell_to_str(raw_ibkr_exit)
         tos_exit = _cell_to_str(raw_tos_exit)
@@ -278,14 +300,23 @@ def _stage_legacy(ws_source) -> None:
         if not ticker:
             print(f"Row {row}: missing ticker; skipping.")
             continue
-        if not direction:
-            print(f"Row {row}: missing trade direction for ticker {ticker}; skipping.")
+        if not direction_ibkr:
+            print(
+                f"Row {row}: missing IBKR direction (Y) for ticker {ticker}; skipping."
+            )
+            continue
+        if not direction_tos:
+            print(
+                f"Row {row}: missing ToS direction (AC) for ticker {ticker}; skipping."
+            )
             continue
         if size is None or str(size).strip() == "":
             print(f"Row {row}: missing share size for ticker {ticker}; skipping.")
             continue
 
-        row_data: TradeRow = (ticker, direction, size, ibkr_exit, tos_exit)
+        row_data: TradeRow = (
+            ticker, direction_ibkr, size, ibkr_exit, tos_exit, direction_tos
+        )
         if flag_val == "T":
             t_rows.append(row_data)
         else:

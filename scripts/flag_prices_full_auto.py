@@ -78,6 +78,7 @@ COL_V = "V"
 COL_S = "S"
 COL_Y = "Y"
 COL_Z = "Z"
+COL_AC = "AC"  # ToS direction (staged to Live_Trade_Info F)
 
 _SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 _BASE_DIR = os.path.dirname(_SCRIPT_DIR)
@@ -915,6 +916,9 @@ def lock_share_sizes_for_next_trading_day(
             if direction not in ("long", "short"):
                 print(f"  Skip row {r.row} {r.ticker}: bad direction")
                 continue
+            direction_tos = _normalize_direction(sheet.range(f"{COL_AC}{r.row}").value)
+            if direction_tos not in ("long", "short"):
+                direction_tos = direction
             z_cell = sheet.range(f"{COL_Z}{r.row}")
             val = z_cell.value
             try:
@@ -922,7 +926,7 @@ def lock_share_sizes_for_next_trading_day(
             except (TypeError, ValueError):
                 print(f"  Skip row {r.row} {r.ticker}: Z not numeric ({val!r})")
                 continue
-            to_write.append((r.ticker, direction, size_num))
+            to_write.append((r.ticker, direction, size_num, "", "", direction_tos))
             live_keys.add((r.ticker, direction))
         if to_write:
             try:

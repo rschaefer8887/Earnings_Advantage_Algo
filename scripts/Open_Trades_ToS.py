@@ -2,12 +2,13 @@
 Open_Trades_ToS — Send equity entry trades to Schwab based on Live_Trade_Info.xlsx.
 
 Workflow:
-- Reads Live_Trade_Info.xlsx (sheet "Daily_Trades"):
+- Reads Live_Trade_Info.xlsx (sheet from Trade_Mode / Full_Auto):
     A: Ticker (e.g. AAPL)
-    B: Direction ("long" / "short")
+    B: Direction IBKR/ToS2 (ignored here)
     C: Share Size (integer)
     D: IBKR Exit (ignored here)
     E: ToS Exit (ignored here for now)
+    F: Direction (ToS) ("long" / "short") — used for this account
 - For each valid row:
     - long  -> Schwab equity BUY market
     - short -> Schwab equity SELL SHORT market
@@ -81,10 +82,10 @@ def read_live_trades() -> List[Tuple[str, str, int]]:
 
     trades: List[Tuple[str, str, int]] = []
 
-    # Expect header in row 1: A=Ticker, B=Direction, C=Share Size
+    # Expect header in row 1: A=Ticker, ..., C=Share Size, F=Direction (ToS)
     for row in range(2, ws.max_row + 1):
         ticker_cell = ws.cell(row=row, column=1).value
-        direction_cell = ws.cell(row=row, column=2).value
+        direction_cell = ws.cell(row=row, column=6).value  # F: Direction (ToS)
         size_cell = ws.cell(row=row, column=3).value
 
         if ticker_cell is None or str(ticker_cell).strip() == "":
@@ -94,7 +95,10 @@ def read_live_trades() -> List[Tuple[str, str, int]]:
         direction_norm = _normalize_direction(direction_cell)
 
         if direction_norm not in ("long", "short"):
-            print(f"Row {row}: invalid direction '{direction_cell}' for ticker {ticker}; skipping.")
+            print(
+                f"Row {row}: invalid ToS direction (F) '{direction_cell}' "
+                f"for ticker {ticker}; skipping."
+            )
             continue
 
         try:

@@ -2,6 +2,7 @@
 Exit_ToS — Exit live trades via Schwab (primary account) from Live_Trade_Info.xlsx.
 
 Uses column E (ToS Exit): "Open" → MARKET, else → MARKET_ON_CLOSE.
+Uses column F (Direction (ToS)) for long/short.
 Requires Live_Trade_Info closed in Excel before running.
 """
 
@@ -13,4 +14,10 @@ DRY_RUN = False  # True = print planned exits only; do not send orders.
 
 if __name__ == "__main__":
     exit_common.DRY_RUN = DRY_RUN
-    raise SystemExit(run_exit_main(account_key="account_id", exit_col="E"))
+    raise SystemExit(
+        run_exit_main(
+            account_key="account_id",
+            exit_col="E",
+            direction_col="F",
+        )
+    )

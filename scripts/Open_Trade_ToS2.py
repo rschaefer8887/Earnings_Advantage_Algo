@@ -4,10 +4,11 @@ Open_Trade_ToS2 — Send equity entry trades to Schwab (secondary ToS account) f
 Workflow:
 - Reads Live_Trade_Info.xlsx (sheet "Daily_Trades"):
     A: Ticker (e.g. AAPL)
-    B: Direction ("long" / "short")
+    B: Direction ("long" / "short") — IBKR / ToS2
     C: Share Size (integer)
     D: IBKR Exit (ignored here)
-    E: ToS Exit (ignored here for now)
+    E: ToS Exit (ignored here)
+    F: Direction (ToS) (ignored here)
 - For each valid row:
     - long  -> Schwab equity BUY market
     - short -> Schwab equity SELL SHORT market

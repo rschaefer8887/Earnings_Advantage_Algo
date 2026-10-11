@@ -190,7 +190,9 @@ def write_live_trades_for_day(
     """
     Write/replace the date sheet for day with trades.
 
-    trades: sequence of (ticker, direction, size, ibkr_exit="", tos_exit="")
+    trades: sequence of
+      (ticker, direction_ibkr, size, ibkr_exit="", tos_exit="", direction_tos="")
+      direction_tos defaults to direction_ibkr when omitted.
     Returns the sheet name written.
     """
     from full_auto_utils import dow_abbrev_for_date, sheet_name_for_trade_date
@@ -213,20 +215,23 @@ def write_live_trades_for_day(
         ws.delete_rows(1, ws.max_row)
 
     ws["A1"] = "Ticker"
-    ws["B1"] = "Direction"
+    ws["B1"] = "Direction (ToS_Open)"
     ws["C1"] = "Share Size"
-    ws["D1"] = "IBKR Exit"
+    ws["D1"] = "ToS_Open_Exit"
     ws["E1"] = "ToS Exit"
+    ws["F1"] = "Direction (ToS)"
 
     for i, item in enumerate(trades, start=2):
         ticker, direction, size = item[0], item[1], item[2]
         ibkr = item[3] if len(item) > 3 else ""
         tos = item[4] if len(item) > 4 else ""
+        direction_tos = item[5] if len(item) > 5 else direction
         ws.cell(row=i, column=1).value = ticker
         ws.cell(row=i, column=2).value = direction
         ws.cell(row=i, column=3).value = size
         ws.cell(row=i, column=4).value = ibkr or None
         ws.cell(row=i, column=5).value = tos or None
+        ws.cell(row=i, column=6).value = direction_tos or None
 
     wb.save(file_path)
     try:

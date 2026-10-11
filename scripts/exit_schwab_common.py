@@ -98,23 +98,35 @@ def _last_row_by_ticker(sheet, col_letter: str = "A", min_row: int = 2, max_scan
             return min_row - 1
 
 
-def read_exit_trade_info(sheet, exit_col: str) -> List[Tuple[str, str, int, str]]:
+def read_exit_trade_info(
+    sheet,
+    exit_col: str,
+    *,
+    direction_col: str = "B",
+) -> List[Tuple[str, str, int, str]]:
     """
-    Bulk-read A–E once; build exits from A/B/C and exit_col ('D' or 'E').
+    Bulk-read A–F once; build exits from ticker/size, direction_col, and exit_col.
+
+    direction_col: 'B' (IBKR/ToS2) or 'F' (ToS primary Direction (ToS))
+    exit_col: 'D' (IBKR Exit) or 'E' (ToS Exit)
 
     Returns [(ticker, action, size, order_type)] with action SELL|BUY and
     order_type MKT|MOC.
     """
     exit_col = exit_col.upper()
+    direction_col = direction_col.upper()
     if exit_col not in ("D", "E"):
         raise ValueError(f"exit_col must be 'D' or 'E', got {exit_col!r}")
-    exit_idx = 3 if exit_col == "D" else 4  # 0-based within A:E
+    if direction_col not in ("B", "F"):
+        raise ValueError(f"direction_col must be 'B' or 'F', got {direction_col!r}")
+    exit_idx = 3 if exit_col == "D" else 4  # 0-based within A:F
+    direction_idx = 1 if direction_col == "B" else 5
 
     max_row = _last_row_by_ticker(sheet, col_letter="A", min_row=2, max_scan=5000)
     if max_row < 2:
         return []
 
-    raw = sheet.range(f"A2:E{max_row}").value
+    raw = sheet.range(f"A2:F{max_row}").value
     if raw is None:
         return []
     if not isinstance(raw, list):
@@ -128,9 +140,11 @@ def read_exit_trade_info(sheet, exit_col: str) -> List[Tuple[str, str, int, str]
         row = 2 + i
         if not isinstance(row_vals, (list, tuple)):
             row_vals = [row_vals]
-        # Pad to 5 columns if Excel returns a short row.
-        cells = list(row_vals) + [None] * (5 - len(row_vals))
-        ticker_cell, direction_cell, size_cell = cells[0], cells[1], cells[2]
+        # Pad to 6 columns if Excel returns a short row.
+        cells = list(row_vals) + [None] * (6 - len(row_vals))
+        ticker_cell = cells[0]
+        direction_cell = cells[direction_idx]
+        size_cell = cells[2]
         exit_type_cell = cells[exit_idx]
 
         if ticker_cell is None or str(ticker_cell).strip() == "":
@@ -139,7 +153,10 @@ def read_exit_trade_info(sheet, exit_col: str) -> List[Tuple[str, str, int, str]
         ticker = str(ticker_cell).strip().upper()
         direction_norm = _normalize_direction(direction_cell)
         if direction_norm not in ("long", "short"):
-            print(f"Row {row}: invalid direction '{direction_cell}' for ticker {ticker}; skipping.")
+            print(
+                f"Row {row}: invalid direction '{direction_cell}' "
+                f"(col {direction_col}) for ticker {ticker}; skipping."
+            )
             continue
 
         try:
@@ -237,12 +254,18 @@ def _resolve_sheet_name(wb) -> Tuple[Optional[str], bool]:
     return datetime.now().strftime("%A"), full_auto
 
 # run_exit_main is the main function that is called from Exit_ToS.py and Exit_ToS2.py
-def run_exit_main(*, account_key: str, exit_col: str) -> int:
+def run_exit_main(
+    *,
+    account_key: str,
+    exit_col: str,
+    direction_col: str = "B",
+) -> int:
     """
     Standalone exit run for one Schwab account.
 
     account_key: 'account_id' (Exit_ToS) or 'account_id2' (Exit_ToS2)
     exit_col: 'E' (primary ToS Exit) or 'D' (secondary / IBKR Exit staging)
+    direction_col: 'F' (ToS Direction) or 'B' (IBKR/ToS2 Direction)
     """
     if xw is None:
         print("xlwings is not installed. Install it with: pip install xlwings")
@@ -277,7 +300,9 @@ def run_exit_main(*, account_key: str, exit_col: str) -> int:
             wb.close()
             return 0 if full_auto else 1
 
-        exits = read_exit_trade_info(sheet, exit_col=exit_col)
+        exits = read_exit_trade_info(
+            sheet, exit_col=exit_col, direction_col=direction_col
+        )
         # Read-only: close without save.
         wb.close()
 
