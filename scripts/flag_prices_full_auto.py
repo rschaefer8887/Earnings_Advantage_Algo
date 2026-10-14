@@ -9,7 +9,9 @@ Price calendar (entry day D from M+K, trading days only):
   - today == D+2 -> Q: M2 at start (closes -> V)
 
 Required C (always, after date jobs):
-  - Morning / default: first trade row above zz with blank column T (not entered).
+  - Morning / default: first trade row above zz with blank column T (not entered),
+    never inside an active M1/M2 contiguous M-block (avoids C one row under M1
+    on AM restage when later rows in that block still have blank T).
   - Evening + open orders today: M1+O on today's weekday block; C on the first
     trade row after that block.
   - Exception: no C when the last column-M weekday block above zz already starts
@@ -670,15 +672,62 @@ def _last_weekday_block_is_m1_or_m2(sheet) -> bool:
     return _is_q_m1_flag(q) or _is_q_m2_flag(q)
 
 
+def _contiguous_m_block_end_row(sheet, start_row: int, end_row: int) -> int:
+    """
+    Last row of the contiguous M+ticker block that begins at start_row
+    (same M token on consecutive rows), capped at end_row.
+    """
+    start_m = parse_m_dow(sheet.range(f"{COL_M}{start_row}").value)
+    if start_m is None:
+        return start_row
+    last = start_row
+    for row in range(start_row + 1, end_row + 1):
+        m_token = parse_m_dow(sheet.range(f"{COL_M}{row}").value)
+        ticker = _normalize_ticker_cell(sheet.range(f"{COL_TICKER}{row}").value)
+        if m_token != start_m or ticker is None:
+            break
+        if row != last + 1:
+            break
+        last = row
+    return last
+
+
+def _rows_owned_by_m1_m2_blocks(sheet, end_row: int) -> set:
+    """
+    Rows belonging to any active M1/M2 contiguous M-block (flag row through
+    end of that same-M ticker run). Required blank-T C must not land here.
+    """
+    owned: set = set()
+    for row in range(HEADER_ROW + 1, end_row + 1):
+        q = sheet.range(f"{COL_Q}{row}").value
+        if not (_is_q_m1_flag(q) or _is_q_m2_flag(q)):
+            continue
+        if parse_m_dow(sheet.range(f"{COL_M}{row}").value) is None:
+            continue
+        if not _normalize_ticker_cell(sheet.range(f"{COL_TICKER}{row}").value):
+            continue
+        block_end = _contiguous_m_block_end_row(sheet, row, end_row)
+        for r in range(row, block_end + 1):
+            owned.add(r)
+    return owned
+
+
 def _first_unentered_trade_row(sheet) -> Optional[int]:
     """
     First trade row above zz with an M day flag, a real ticker, and blank column T.
     Blank T means no open yet — trade not entered — C belongs here.
-    Skips rows that already hold M1/M2 (do not overwrite those flags).
+
+    Skips:
+      - rows that already hold M1/M2
+      - any row inside an active M1/M2 contiguous M-block (so AM restage does
+        not put C one row under M1 when later rows in that block still lack T)
     """
     zz = _find_zz_end_row(sheet, HEADER_ROW + 1)
     end = (zz - 1) if zz is not None else _sheet_scan_max_row(sheet)
+    owned = _rows_owned_by_m1_m2_blocks(sheet, end)
     for row in range(HEADER_ROW + 1, end + 1):
+        if row in owned:
+            continue
         if parse_m_dow(sheet.range(f"{COL_M}{row}").value) is None:
             continue
         if not _normalize_ticker_cell(sheet.range(f"{COL_TICKER}{row}").value):
@@ -729,7 +778,7 @@ def ensure_required_c_flag(
 
     Placement:
       - Evening after open-trades: first trade row after the entered weekday block
-      - Otherwise: first unentered trade (blank column T)
+      - Otherwise: first unentered trade (blank column T) outside any M1/M2 block
 
     Closing Q 0: zz when near end of sheet, else after 7-trading-day M-block.
     """

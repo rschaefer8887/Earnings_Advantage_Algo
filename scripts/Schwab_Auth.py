@@ -89,8 +89,9 @@ def write_auth_timestamp(path: str = AUTH_TIMESTAMP_PATH) -> None:
         "last_auth_utc": now_utc.strftime("%Y-%m-%dT%H:%M:%SZ"),
         "last_auth_mountain": _format_mountain_12h(now_utc),
     }
-    with open(path, "w", encoding="utf-8") as f:
+    with open(path, "w", encoding="utf-8", newline="\n") as f:
         json.dump(data, f, indent=2)
+        f.write("\n")
 
 
 def print_account_numbers_for_config(client: Any, cfg: Dict[str, Any]) -> None:

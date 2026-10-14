@@ -44,8 +44,10 @@ def write_price_job_success(
     }
     if extra:
         data.update(extra)
-    with open(path, "w", encoding="utf-8") as f:
+    # newline='\n' keeps LF on Windows so git eol=lf does not warn on every run.
+    with open(path, "w", encoding="utf-8", newline="\n") as f:
         json.dump(data, f, indent=2)
+        f.write("\n")
     print(f"Recorded {job_name} success: {data['last_success_mountain']}")
 
 
