@@ -64,6 +64,7 @@ from live_trade_info_utils import (
 from earnings_workbook_utils import (
     LATEST_EARNINGS_FILE,
     LATEST_EARNINGS_SHEET,
+    nudge_onedrive_sync,
     open_or_attach_earnings_workbook,
     release_earnings_workbook,
 )
@@ -1400,132 +1401,178 @@ def resolve_flag_as_of_date(sheet, calendar_today: date) -> date:
     print(f"  Same-day/morning mode -> place flags as-of: {calendar_today}")
     return calendar_today
 
+def _apply_flag_prices_to_sheet(sheet, calendar_today: date) -> Optional[date]:
+    """
+    Mutate P/Q (and evening Z) on an already-open Trades sheet.
+    Returns as-of date when work ran; None if nothing to flag.
+    Caller owns workbook save/close.
+    """
+    all_rows = _collect_earnings_rows(sheet)
+    if not all_rows:
+        print("  No Full_Auto earnings rows (M+K+Y); nothing to flag.")
+        return None
+
+    as_of = resolve_flag_as_of_date(sheet, calendar_today)
+    evening = _is_evening_flag_mode(sheet, calendar_today)
+    clear_completed_price_flags(sheet)
+
+    open_block_end: Optional[int] = None
+    if evening and _evening_open_orders_ready(calendar_today):
+        open_block_end = place_evening_entered_trade_flags(
+            sheet, all_rows, calendar_today
+        )
+    elif evening:
+        print(
+            "  Evening mode but open-orders gate not met; "
+            "skipping entered-day M1/O promotion."
+        )
+
+    trade_dates = sorted({r.trade_date for r in all_rows})
+
+    d_for_c = [d for d in trade_dates if d == as_of]
+    d_for_m1 = [d for d in trade_dates if add_trading_days(d, 1) == as_of]
+    d_for_m2 = [d for d in trade_dates if add_trading_days(d, 2) == as_of]
+
+    print(
+        f"\nPlacing flags as-of {as_of}: "
+        f"C days={d_for_c}, M1 days={d_for_m1}, M2 days={d_for_m2}"
+    )
+
+    if not d_for_c and not d_for_m1 and not d_for_m2:
+        print(
+            f"  No date-matched C/M1/O/M2 jobs as-of {as_of}; "
+            f"still ensuring required blank-T C."
+        )
+    else:
+        c_start_rows: List[int] = []
+
+        for d in d_for_c:
+            rows = _rows_for_trade_date(all_rows, d)
+            groups = _contiguous_groups(rows)
+            for g in groups:
+                idx = _first_empty_dest_index(sheet, g, COL_S)
+                if idx is not None:
+                    c_start_rows.append(g[idx].row)
+            _flag_job_for_groups(
+                sheet, groups, dest_col=COL_S, q_flag="C", job_label=f"C->S (D={d})"
+            )
+
+        for d in d_for_m2:
+            rows = _rows_for_trade_date(all_rows, d)
+            groups = _contiguous_groups(rows)
+            _flag_job_for_groups(
+                sheet, groups, dest_col=COL_V, q_flag="M2", job_label=f"M2->V (D={d})"
+            )
+
+        for d in d_for_m1:
+            rows = _rows_for_trade_date(all_rows, d)
+            groups = _contiguous_groups(rows)
+            _flag_job_for_groups(
+                sheet,
+                groups,
+                dest_col=COL_T,
+                p_flag="O",
+                q_flag="M1",
+                job_label=f"O->T + M1->U (D={d}, D+1={as_of})",
+            )
+
+        for row in sorted(set(c_start_rows)):
+            if not _is_q_c_flag(sheet.range(f"{COL_Q}{row}").value):
+                sheet.range(f"{COL_Q}{row}").value = "C"
+                print(f"  Restored Q C@{row} after M1/M2 pass.")
+
+    ensure_required_c_flag(sheet, after_open_block_row=open_block_end)
+
+    if evening:
+        lock_share_sizes_for_next_trading_day(sheet, all_rows, calendar_today)
+    else:
+        print(
+            "\nSkipping Z share-size lock (morning/same-day mode; "
+            "lock only runs after market close / evening mode)."
+        )
+
+    validate_flag_layout_strict(sheet)
+    return as_of
+
+
 def flag_prices_full_auto(
     *,
     earnings_file: str = LATEST_EARNINGS_FILE,
     today: Optional[date] = None,
-) -> None:
+    sheet: Any = None,
+    wb: Any = None,
+    save: bool = True,
+) -> bool:
     """
     Write P/Q flags for Full_Auto price jobs.
 
     Evening (opens+closes succeeded today and dests filled): clear completed flags,
     then place flags as-of the *next* trading day.
     Morning / otherwise: place flags as-of calendar today (idempotent).
+
+    When ``sheet`` is provided (e.g. Stage already opened Earnings via xlwings),
+    this function does not open/close Excel. Set ``save=False`` so the caller
+    can save once after staging + flagging.
+
+    Returns True if the sheet was updated and needs saving; False if skipped.
     """
     calendar_today = today or date.today()
     if not is_trading_day(calendar_today):
         print(f"Flag_Prices_Full_Auto: {calendar_today} is not a trading day; skip.")
-        return
-    if not os.path.exists(earnings_file):
-        print(f"Flag_Prices_Full_Auto: earnings file not found: {earnings_file}")
-        return
+        return False
+
+    owns_workbook = sheet is None
+    if owns_workbook:
+        if not os.path.exists(earnings_file):
+            print(f"Flag_Prices_Full_Auto: earnings file not found: {earnings_file}")
+            return False
 
     print(f"\nFlag_Prices_Full_Auto (calendar {calendar_today})...")
     app = None
-    wb = None
     owned_app = False
     owned_book = False
+    did_save = False
     try:
-        app, wb, owned_app, owned_book = open_or_attach_earnings_workbook(earnings_file)
-        try:
-            sheet = wb.sheets[LATEST_EARNINGS_SHEET]
-        except Exception:
-            print(f"Sheet '{LATEST_EARNINGS_SHEET}' not found.")
-            return
-
-        all_rows = _collect_earnings_rows(sheet)
-        if not all_rows:
-            print("  No Full_Auto earnings rows (M+K+Y); nothing to flag.")
-            return
-
-        as_of = resolve_flag_as_of_date(sheet, calendar_today)
-        evening = _is_evening_flag_mode(sheet, calendar_today)
-        clear_completed_price_flags(sheet)
-
-        open_block_end: Optional[int] = None
-        if evening and _evening_open_orders_ready(calendar_today):
-            open_block_end = place_evening_entered_trade_flags(
-                sheet, all_rows, calendar_today
+        if owns_workbook:
+            app, wb, owned_app, owned_book = open_or_attach_earnings_workbook(
+                earnings_file
             )
-        elif evening:
-            print(
-                "  Evening mode but open-orders gate not met; "
-                "skipping entered-day M1/O promotion."
-            )
+            try:
+                sheet = wb.sheets[LATEST_EARNINGS_SHEET]
+            except Exception:
+                print(f"Sheet '{LATEST_EARNINGS_SHEET}' not found.")
+                return False
 
-        trade_dates = sorted({r.trade_date for r in all_rows})
+        as_of = _apply_flag_prices_to_sheet(sheet, calendar_today)
+        if as_of is None:
+            return False
 
-        d_for_c = [d for d in trade_dates if d == as_of]
-        d_for_m1 = [d for d in trade_dates if add_trading_days(d, 1) == as_of]
-        d_for_m2 = [d for d in trade_dates if add_trading_days(d, 2) == as_of]
-
-        print(
-            f"\nPlacing flags as-of {as_of}: "
-            f"C days={d_for_c}, M1 days={d_for_m1}, M2 days={d_for_m2}"
-        )
-
-        if not d_for_c and not d_for_m1 and not d_for_m2:
-            print(
-                f"  No date-matched C/M1/O/M2 jobs as-of {as_of}; "
-                f"still ensuring required blank-T C."
-            )
-        else:
-            c_start_rows: List[int] = []
-
-            for d in d_for_c:
-                rows = _rows_for_trade_date(all_rows, d)
-                groups = _contiguous_groups(rows)
-                for g in groups:
-                    idx = _first_empty_dest_index(sheet, g, COL_S)
-                    if idx is not None:
-                        c_start_rows.append(g[idx].row)
-                _flag_job_for_groups(
-                    sheet, groups, dest_col=COL_S, q_flag="C", job_label=f"C->S (D={d})"
+        if save:
+            if wb is None:
+                raise RuntimeError(
+                    "flag_prices_full_auto(save=True) requires wb when sheet is passed"
                 )
-
-            for d in d_for_m2:
-                rows = _rows_for_trade_date(all_rows, d)
-                groups = _contiguous_groups(rows)
-                _flag_job_for_groups(
-                    sheet, groups, dest_col=COL_V, q_flag="M2", job_label=f"M2->V (D={d})"
-                )
-
-            for d in d_for_m1:
-                rows = _rows_for_trade_date(all_rows, d)
-                groups = _contiguous_groups(rows)
-                _flag_job_for_groups(
-                    sheet,
-                    groups,
-                    dest_col=COL_T,
-                    p_flag="O",
-                    q_flag="M1",
-                    job_label=f"O->T + M1->U (D={d}, D+1={as_of})",
-                )
-
-            for row in sorted(set(c_start_rows)):
-                if not _is_q_c_flag(sheet.range(f"{COL_Q}{row}").value):
-                    sheet.range(f"{COL_Q}{row}").value = "C"
-                    print(f"  Restored Q C@{row} after M1/M2 pass.")
-
-        ensure_required_c_flag(sheet, after_open_block_row=open_block_end)
-
-        if evening:
-            lock_share_sizes_for_next_trading_day(sheet, all_rows, calendar_today)
-        else:
-            print(
-                "\nSkipping Z share-size lock (morning/same-day mode; "
-                "lock only runs after market close / evening mode)."
-            )
-
-        validate_flag_layout_strict(sheet)
-
-        try:
-            wb.save()
-        except Exception:
             try:
                 wb.save()
-            except Exception as e:
-                print(f"  Warning: could not save earnings workbook after flagging: {e}")
-        print(f"Flag_Prices_Full_Auto: done (as-of {as_of}).")
+            except Exception:
+                try:
+                    wb.save()
+                except Exception as e:
+                    raise RuntimeError(
+                        f"could not save earnings workbook after flagging: {e}"
+                    ) from e
+            did_save = True
+            print(f"Flag_Prices_Full_Auto: done (as-of {as_of}; saved).")
+        else:
+            print(
+                f"Flag_Prices_Full_Auto: done (as-of {as_of}; "
+                f"save deferred to caller)."
+            )
+        return True
     finally:
-        release_earnings_workbook(app, wb, owned_app=owned_app, owned_book=owned_book)
+        if owns_workbook:
+            release_earnings_workbook(
+                app, wb, owned_app=owned_app, owned_book=owned_book
+            )
+            if did_save:
+                nudge_onedrive_sync(earnings_file)

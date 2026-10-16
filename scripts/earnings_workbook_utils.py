@@ -9,6 +9,7 @@ release_earnings_workbook() in a finally block.
 from __future__ import annotations
 
 import os
+import time
 from typing import Any, Optional, Tuple
 
 _SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -178,3 +179,25 @@ def release_earnings_workbook(
             app.quit()
         except Exception:
             pass
+
+
+def nudge_onedrive_sync(file_path: str, *, settle_seconds: float = 0.75) -> None:
+    """
+    Wake OneDrive after a headless Excel COM save.
+
+    Hidden Excel often updates the local file without the sync client noticing
+    until something else touches it. Bumping mtime after Excel has released the
+    handle (no UI) usually starts upload sooner. Safe no-op if the path is
+    missing or still locked.
+    """
+    abs_path = os.path.abspath(file_path)
+    if not os.path.isfile(abs_path):
+        return
+    if settle_seconds > 0:
+        time.sleep(settle_seconds)
+    try:
+        now = time.time()
+        os.utime(abs_path, (now, now))
+        print(f"  Nudged OneDrive sync: {os.path.basename(abs_path)}")
+    except OSError as e:
+        print(f"  Warning: could not nudge OneDrive sync ({e})")

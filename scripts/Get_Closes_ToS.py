@@ -22,7 +22,11 @@ except ImportError:
     xw = None
 
 from Schwab_Auth import create_client
-from earnings_workbook_utils import open_or_attach_earnings_workbook, release_earnings_workbook
+from earnings_workbook_utils import (
+    nudge_onedrive_sync,
+    open_or_attach_earnings_workbook,
+    release_earnings_workbook,
+)
 from price_run_timestamps import write_closes_success
 
 _SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -158,6 +162,7 @@ def main() -> None:
     wb = None
     owned_app = False
     owned_book = False
+    did_save = False
     try:
         app, wb, owned_app, owned_book = open_or_attach_earnings_workbook(SOURCE_FILE)
         try:
@@ -221,6 +226,7 @@ def main() -> None:
             print("DRY_RUN is True: no workbook writes were made.")
         else:
             wb.save()
+            did_save = True
             print("Closing prices written to Latest Earnings (saved via Excel).")
             write_closes_success()
 
@@ -230,6 +236,8 @@ def main() -> None:
             print(f"  Column {col}: {', '.join(tickers) if tickers else '(none)'}")
     finally:
         release_earnings_workbook(app, wb, owned_app=owned_app, owned_book=owned_book)
+        if did_save:
+            nudge_onedrive_sync(SOURCE_FILE)
 
 
 if __name__ == "__main__":

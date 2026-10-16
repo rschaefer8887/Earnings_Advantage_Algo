@@ -6,7 +6,8 @@ Modes (Live_Trade_Info Trade_Mode!C3):
       "T" → Daily_Trades; "1"–"5" → Monday–Friday sheets.
   - Full_Auto: ignore O; use columns M + K + Y (+ AC). Stage from the first
       trade-row C in column Q downward; if none, fall back to first M1.
-      After staging, runs price flagging in-process (scheduler unchanged).
+      Opens Latest Earnings once via xlwings, stages Live_Trade_Info, runs
+      price flagging on the same book, then saves Earnings once at the end.
 
 Live_Trade_Info per staged row:
   A ticker, B Direction (ToS_Open) from Y, C Share Size (Z),
@@ -151,121 +152,195 @@ def _is_q_m1_flag(cell_value: Any) -> bool:
     return str(cell_value).strip().upper() == "M1"
 
 
-def _first_trade_row_c_flag(ws_source, max_row: int) -> Optional[int]:
+def _xw_cell(sheet, col: str, row: int) -> Any:
+    """Read one cell from an xlwings sheet."""
+    return sheet.range(f"{col}{row}").value
+
+
+def _xw_max_row(sheet) -> int:
+    """Last used row on an xlwings sheet (fallback keeps a wide scan)."""
+    try:
+        used = sheet.used_range
+        if used is not None:
+            return int(used.last_cell.row)
+    except Exception:
+        pass
+    return 5000
+
+
+def _first_trade_row_c_flag_xw(sheet, max_row: int) -> Optional[int]:
     """
     First Q C on a real trade row (column M has a day flag).
     Skips terminator-only C on blank-M rows below an M1 block.
     """
     for row in range(HEADER_ROW + 1, max_row + 1):
-        if not _is_q_c_flag(ws_source[f"{COL_Q}{row}"].value):
+        if not _is_q_c_flag(_xw_cell(sheet, COL_Q, row)):
             continue
-        if parse_m_dow(ws_source[f"{COL_M}{row}"].value) is None:
+        if parse_m_dow(_xw_cell(sheet, COL_M, row)) is None:
             continue
         return row
     return None
 
 
-def _first_m1_flag_row(ws_source, max_row: int) -> Optional[int]:
+def _first_m1_flag_row_xw(sheet, max_row: int) -> Optional[int]:
     """First Q M1 flag (fallback staging start on M1-only days)."""
     for row in range(HEADER_ROW + 1, max_row + 1):
-        if _is_q_m1_flag(ws_source[f"{COL_Q}{row}"].value):
+        if _is_q_m1_flag(_xw_cell(sheet, COL_Q, row)):
             return row
     return None
 
 
-def _resolve_full_auto_stage_start(ws_source, max_row: int) -> Optional[tuple]:
+def _resolve_full_auto_stage_start_xw(sheet, max_row: int) -> Optional[tuple]:
     """
     Return (start_row, reason) for Full_Auto staging.
     Prefer first trade-row C; else first M1; else None.
     """
-    c_row = _first_trade_row_c_flag(ws_source, max_row)
+    c_row = _first_trade_row_c_flag_xw(sheet, max_row)
     if c_row is not None:
         return c_row, f"trade-row C at {c_row}"
-    m1_row = _first_m1_flag_row(ws_source, max_row)
+    m1_row = _first_m1_flag_row_xw(sheet, max_row)
     if m1_row is not None:
         return m1_row, f"M1 fallback at {m1_row} (no trade-row C)"
     return None
 
 
-def _stage_full_auto(ws_source) -> None:
+def _write_live_trade_info_sheets(by_sheet: Dict[str, List[TradeRow]]) -> None:
+    """Write staged trades to Live_Trade_Info (separate from Earnings save)."""
+    if not os.path.exists(OUTPUT_FILE):
+        wb_output = Workbook()
+        wb_output.remove(wb_output.active)
+    else:
+        wb_output = load_workbook(OUTPUT_FILE)
+
+    all_tickers: List[str] = []
+    for sheet_name in sorted(by_sheet.keys()):
+        trades = by_sheet[sheet_name]
+        if sheet_name not in wb_output.sheetnames:
+            wb_output.create_sheet(sheet_name)
+        _write_trades_to_sheet(wb_output[sheet_name], trades)
+        print(f"Wrote {len(trades)} trade(s) to sheet '{sheet_name}'.")
+        all_tickers.extend(t[0] for t in trades)
+
+    wb_output.save(OUTPUT_FILE)
+    try:
+        wb_output.close()
+    except Exception:
+        pass
+    print(f"Full_Auto staging complete. Tickers: {', '.join(all_tickers)}.")
+
+
+def _collect_full_auto_trades_xw(sheet) -> Dict[str, List[TradeRow]]:
     """Stage M+K+Y+AC from first trade-row C (or M1 fallback) downward."""
-    max_row = ws_source.max_row
+    max_row = _xw_max_row(sheet)
     by_sheet: Dict[str, List[TradeRow]] = defaultdict(list)
 
-    start_info = _resolve_full_auto_stage_start(ws_source, max_row)
+    start_info = _resolve_full_auto_stage_start_xw(sheet, max_row)
     if start_info is None:
         print(
             "Full_Auto: no trade-row C and no M1 in column Q; staging nothing."
         )
-    else:
-        start_row, reason = start_info
-        print(f"Full_Auto: staging from {reason} downward.")
-        for row in range(start_row, max_row + 1):
-            m_token = parse_m_dow(ws_source[f"{COL_M}{row}"].value)
-            k_date = parse_earnings_date(ws_source[f"{COL_K}{row}"].value)
-            direction_ibkr = _normalize_direction(
-                ws_source[f"{COL_DIRECTION_IBKR}{row}"].value
+        return by_sheet
+
+    start_row, reason = start_info
+    print(f"Full_Auto: staging from {reason} downward.")
+    for row in range(start_row, max_row + 1):
+        m_token = parse_m_dow(_xw_cell(sheet, COL_M, row))
+        k_date = parse_earnings_date(_xw_cell(sheet, COL_K, row))
+        direction_ibkr = _normalize_direction(
+            _xw_cell(sheet, COL_DIRECTION_IBKR, row)
+        )
+        direction_tos = _normalize_direction(
+            _xw_cell(sheet, COL_DIRECTION_TOS, row)
+        )
+        ticker = _normalize_ticker(_xw_cell(sheet, COL_TICKER, row))
+        size = _xw_cell(sheet, COL_SIZE, row)
+        ibkr_exit = _cell_to_str(_xw_cell(sheet, COL_IBKR_EXIT, row))
+        tos_exit = _cell_to_str(_xw_cell(sheet, COL_TOS_EXIT, row))
+
+        if not m_token or k_date is None:
+            continue
+        if not ticker:
+            print(f"Row {row}: missing ticker; skipping.")
+            continue
+        if direction_ibkr not in ("long", "short"):
+            continue
+        if direction_tos not in ("long", "short"):
+            print(
+                f"Row {row}: missing/invalid ToS direction (AC) for ticker "
+                f"{ticker}; skipping."
             )
-            direction_tos = _normalize_direction(
-                ws_source[f"{COL_DIRECTION_TOS}{row}"].value
-            )
-            ticker = _normalize_ticker(ws_source[f"{COL_TICKER}{row}"].value)
-            size = ws_source[f"{COL_SIZE}{row}"].value
-            ibkr_exit = _cell_to_str(ws_source[f"{COL_IBKR_EXIT}{row}"].value)
-            tos_exit = _cell_to_str(ws_source[f"{COL_TOS_EXIT}{row}"].value)
+            continue
+        if size is None or str(size).strip() == "":
+            print(f"Row {row}: missing share size for ticker {ticker}; skipping.")
+            continue
 
-            if not m_token or k_date is None:
-                continue
-            if not ticker:
-                print(f"Row {row}: missing ticker; skipping.")
-                continue
-            if direction_ibkr not in ("long", "short"):
-                continue
-            if direction_tos not in ("long", "short"):
-                print(
-                    f"Row {row}: missing/invalid ToS direction (AC) for ticker "
-                    f"{ticker}; skipping."
-                )
-                continue
-            if size is None or str(size).strip() == "":
-                print(f"Row {row}: missing share size for ticker {ticker}; skipping.")
-                continue
+        trade_date = resolve_trade_date(m_token, k_date)
+        sheet_name = sheet_name_for_trade_date(trade_date, m_token)
+        by_sheet[sheet_name].append(
+            (ticker, direction_ibkr, size, ibkr_exit, tos_exit, direction_tos)
+        )
+    return by_sheet
 
-            trade_date = resolve_trade_date(m_token, k_date)
-            sheet_name = sheet_name_for_trade_date(trade_date, m_token)
-            by_sheet[sheet_name].append(
-                (ticker, direction_ibkr, size, ibkr_exit, tos_exit, direction_tos)
-            )
 
-    if not by_sheet:
-        print("Full_Auto: no eligible trades to stage (from C/M1 start downward).")
-    else:
-        if not os.path.exists(OUTPUT_FILE):
-            wb_output = Workbook()
-            wb_output.remove(wb_output.active)
-        else:
-            wb_output = load_workbook(OUTPUT_FILE)
+def _stage_full_auto() -> None:
+    """
+    Full_Auto: one xlwings open of Latest Earnings — stage Live_Trade_Info,
+    flag P/Q on the same book, save Earnings once, then release.
+    """
+    from earnings_workbook_utils import (
+        nudge_onedrive_sync,
+        open_or_attach_earnings_workbook,
+        release_earnings_workbook,
+    )
+    from flag_prices_full_auto import flag_prices_full_auto
 
-        all_tickers: List[str] = []
-        for sheet_name in sorted(by_sheet.keys()):
-            trades = by_sheet[sheet_name]
-            if sheet_name not in wb_output.sheetnames:
-                wb_output.create_sheet(sheet_name)
-            _write_trades_to_sheet(wb_output[sheet_name], trades)
-            print(f"Wrote {len(trades)} trade(s) to sheet '{sheet_name}'.")
-            all_tickers.extend(t[0] for t in trades)
-
-        wb_output.save(OUTPUT_FILE)
-        print(f"Full_Auto staging complete. Tickers: {', '.join(all_tickers)}.")
-
-    print("Full_Auto: running embedded price flagging...")
+    app = None
+    wb = None
+    owned_app = False
+    owned_book = False
+    did_save_earnings = False
     try:
-        from flag_prices_full_auto import flag_prices_full_auto
+        app, wb, owned_app, owned_book = open_or_attach_earnings_workbook(SOURCE_FILE)
+        try:
+            sheet = wb.sheets[SOURCE_SHEET]
+        except Exception:
+            print(f"Worksheet '{SOURCE_SHEET}' not found in {SOURCE_FILE}.")
+            return
 
-        flag_prices_full_auto(earnings_file=SOURCE_FILE)
+        by_sheet = _collect_full_auto_trades_xw(sheet)
+        if not by_sheet:
+            print("Full_Auto: no eligible trades to stage (from C/M1 start downward).")
+        else:
+            _write_live_trade_info_sheets(by_sheet)
+
+        print("Full_Auto: running embedded price flagging (same Excel session)...")
+        needs_save = flag_prices_full_auto(
+            earnings_file=SOURCE_FILE,
+            sheet=sheet,
+            wb=wb,
+            save=False,
+        )
+        if needs_save:
+            try:
+                wb.save()
+            except Exception:
+                try:
+                    wb.save()
+                except Exception as e:
+                    print(f"Full_Auto: failed to save Latest Earnings after flagging: {e}")
+                    sys.exit(1)
+            did_save_earnings = True
+            print("Full_Auto: Latest Earnings saved once after flagging.")
+        else:
+            print("Full_Auto: no Earnings flag changes; skip Earnings save.")
     except Exception as e:
-        print(f"Full_Auto flagging failed (staging already saved): {e}")
+        print(f"Full_Auto staging/flagging failed: {e}")
         sys.exit(1)
+    finally:
+        release_earnings_workbook(app, wb, owned_app=owned_app, owned_book=owned_book)
+        # After headless Excel quits, bump mtime so OneDrive notices the COM save.
+        if did_save_earnings:
+            nudge_onedrive_sync(SOURCE_FILE)
 
 
 def _stage_legacy(ws_source) -> None:
@@ -383,6 +458,22 @@ def main() -> None:
         print(f"Source Earnings file not found: {SOURCE_FILE}")
         return
 
+    mode_raw = read_trade_mode_value(OUTPUT_FILE) if os.path.exists(OUTPUT_FILE) else None
+    if is_full_auto_mode(mode_raw):
+        print(
+            f"Trade_Mode is {MODE_FULL_AUTO}: staging from M+K+Y (ignore O); "
+            f"xlwings single-session Earnings save."
+        )
+        try:
+            _stage_full_auto()
+        except PermissionError:
+            print(
+                "Could not update Live_Trade_Info or Latest Earnings "
+                "(file may be open). Please close it."
+            )
+            sys.exit(1)
+        return
+
     try:
         wb_source = load_workbook(SOURCE_FILE, data_only=True)
     except PermissionError:
@@ -395,17 +486,13 @@ def main() -> None:
         print(f"Worksheet '{SOURCE_SHEET}' not found in {SOURCE_FILE}.")
         return
 
-    mode_raw = read_trade_mode_value(OUTPUT_FILE) if os.path.exists(OUTPUT_FILE) else None
-    if is_full_auto_mode(mode_raw):
-        print(f"Trade_Mode is {MODE_FULL_AUTO}: staging from M+K+Y (ignore O).")
+    try:
+        _stage_legacy(ws_source)
+    finally:
         try:
-            _stage_full_auto(ws_source)
-        except PermissionError:
-            print("Could not update Live_Trade_Info (file may be open). Please close it.")
-            sys.exit(1)
-        return
-
-    _stage_legacy(ws_source)
+            wb_source.close()
+        except Exception:
+            pass
 
 
 if __name__ == "__main__":
