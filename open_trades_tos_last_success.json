@@ -1,8 +1,8 @@
 {
   "job": "Open_Trades_ToS",
-  "last_success_utc": "2026-10-16T13:45:04Z",
-  "last_success_mountain": "Oct 16, 2026 7:45 AM MT",
-  "last_success_date_mt": "2026-10-16",
-  "trade_count": 1,
+  "last_success_utc": "2026-10-22T13:45:06Z",
+  "last_success_mountain": "Oct 22, 2026 7:45 AM MT",
+  "last_success_date_mt": "2026-10-22",
+  "trade_count": 6,
   "had_trades": true
 }

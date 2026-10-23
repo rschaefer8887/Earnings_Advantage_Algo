@@ -1,20 +1,20 @@
 """
-Cancel_All_ToS - Cancel all open Schwab (ThinkOrSwim) orders on both linked accounts.
+Cancel_All_ToS - Cancel open Schwab (ThinkOrSwim) orders on selected accounts.
 
 Manual emergency backup script. Cancels pending/working orders only; does not close
 filled positions.
 
 Accounts (from schwab_config.json):
-  - account_id  - primary ToS account (Open_Trades_ToS.py / Exit_ToS.py)
-  - account_id2 - secondary ToS account (Open_Trade_ToS2.py / Exit_ToS2.py)
+  - account_id  - primary ToS account (Open_Trades_ToS.py / Exit_ToS.py) — typical MOC
+  - account_id2 - secondary ToS account (Open_Trade_ToS2.py / Exit_ToS2.py) — typical Open
 
 Prerequisites:
   - schwab-py installed: python -m pip install --upgrade schwab-py
   - Run Schwab_Auth.py first so schwab_config.json and token file exist
 
 Usage:
-  - Leave DRY_RUN = True to list orders without cancelling.
-  - Set DRY_RUN = False, then run: python scripts/Cancel_All_ToS.py
+  python scripts/Cancel_All_ToS.py
+  Then choose 1 (ToS), 2 (ToS2), or 3 (both) at the prompt.
 """
 
 from typing import Any, Dict, List, Optional, Set, Tuple
@@ -30,7 +30,7 @@ else:
     SCHWAB_IMPORT_ERROR = None
 
 # When True, list open orders but do not send cancel requests.
-DRY_RUN = True
+DRY_RUN = False
 
 # Schwab order statuses that are still open and may be cancelled.
 CANCELLABLE_STATUSES: Set[str] = {
@@ -87,6 +87,21 @@ def _fetch_open_orders(client: Any, account_hash: str) -> List[Dict[str, Any]]:
         if order.get("status") in CANCELLABLE_STATUSES:
             open_orders.append(order)
     return open_orders
+
+
+def _prompt_account_choice() -> str:
+    """
+    Ask which account(s) to cancel. Returns '1', '2', or '3'.
+    """
+    print("Cancel which accounts?")
+    print("  1) Cancel all orders in ToS, your typical MOC account.")
+    print("  2) Cancel all orders in ToS2, your typical Open account.")
+    print("  3) Cancel all orders in both ToS accounts.")
+    while True:
+        choice = input("Enter 1-3: ").strip()
+        if choice in ("1", "2", "3"):
+            return choice
+        print("Please enter 1, 2, or 3.")
 
 
 def cancel_account_orders(
@@ -156,19 +171,30 @@ def main() -> int:
     print(f"Cancel_All_ToS - {mode}")
     print("Cancels open Schwab orders only; does not close filled positions.\n")
 
+    choice = _prompt_account_choice()
+
     try:
         client, cfg = create_client_from_token()
     except Exception as e:
         print(f"Failed to create Schwab client: {e}")
         return 1
 
-    accounts: List[Tuple[str, Optional[str]]] = [
-        ("ToS primary", cfg.get("account_id")),
-        ("ToS secondary", cfg.get("account_id2")),
+    all_accounts: List[Tuple[str, Optional[str]]] = [
+        ("ToS (MOC)", cfg.get("account_id")),
+        ("ToS2 (Open)", cfg.get("account_id2")),
     ]
+    if choice == "1":
+        accounts = [all_accounts[0]]
+    elif choice == "2":
+        accounts = [all_accounts[1]]
+    else:
+        accounts = all_accounts
 
-    if not cfg.get("account_id"):
+    if choice in ("1", "3") and not cfg.get("account_id"):
         print("account_id is missing from schwab_config.json; cannot continue.")
+        return 1
+    if choice in ("2", "3") and not cfg.get("account_id2"):
+        print("account_id2 is missing from schwab_config.json; cannot continue.")
         return 1
 
     total_cancelled = 0
