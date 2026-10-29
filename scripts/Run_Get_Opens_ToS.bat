@@ -11,17 +11,18 @@ if not exist "C:\Users\ryanc\OneDrive\repos\Trading_Algo\Admin\Logs" mkdir "C:\U
 echo ===== %date% %time% bat wrapper ===== >> "%LOG%"
 
 REM Close Excel and clear read-only so the script can open/save the workbook.
-taskkill /IM EXCEL.EXE /F /T >> "%LOG%" 2>&1
+REM stderr discarded so "EXCEL.EXE not found" is not logged when Excel is already closed.
+taskkill /IM EXCEL.EXE /F /T >> "%LOG%" 2>nul
 attrib -R "%EARNINGS%" >> "%LOG%" 2>&1
 timeout /t 10 /nobreak >nul
 
 echo Running Get_Opens_ToS.py (script tees its own log) >> "%LOG%"
 set "ALGO_SCHEDULED=1"
-REM Do not redirect stdout here — Get_Opens_ToS.py appends to the same log via run_logging.
+REM Do not redirect stdout here — the .py appends to the same log via run_logging.
 "%PY%" "Get_Opens_ToS.py"
 set "EXIT_CODE=%ERRORLEVEL%"
 echo Exit code: %EXIT_CODE% >> "%LOG%"
 
 REM Cleanup any orphan hidden Excel left from a prior run.
-taskkill /IM EXCEL.EXE /F /T >> "%LOG%" 2>&1
+taskkill /IM EXCEL.EXE /F /T >> "%LOG%" 2>nul
 exit /b %EXIT_CODE%
