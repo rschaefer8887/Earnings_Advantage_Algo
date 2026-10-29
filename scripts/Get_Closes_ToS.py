@@ -3,18 +3,22 @@ Get Closes ToS - Closing prices from Schwab/ToS API into Latest Earnings.
 
 Standalone script that fetches daily closes via Schwab/ToS API.
 
-If Latest Earnings is already open in Excel, attaches to that workbook; otherwise
-opens it in a hidden Excel instance.
+If Latest Earnings is already open in Excel, attaches and saves that session;
+otherwise opens a hidden Excel instance. Leaves a user-owned workbook open.
 
 Workbook logic (Trades sheet):
   - Column Q flag states: M2 -> write to V, M1 -> write to U, C -> write to S, 0 stops.
   - Column A: ticker per row.
+
+Success stamp is written only after prices are written and wb.save() succeeds.
+Empty/no-work runs exit non-zero so Task Scheduler does not report success.
 """
 
 import os
-import sys
 import time
+from datetime import datetime
 from typing import Dict, List, Optional, Tuple
+from zoneinfo import ZoneInfo
 
 try:
     import xlwings as xw
@@ -28,6 +32,9 @@ from earnings_workbook_utils import (
     release_earnings_workbook,
 )
 from price_run_timestamps import write_closes_success
+from run_logging import install_run_log
+
+MOUNTAIN_TZ = ZoneInfo("America/Denver")
 
 _SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 _BASE_DIR = os.path.dirname(_SCRIPT_DIR)
@@ -150,26 +157,49 @@ def _fetch_closes_via_schwab(tickers: List[str]) -> Dict[str, Optional[float]]:
     return result
 
 
-def main() -> None:
+def _save_stamp_mt() -> str:
+    now = datetime.now(MOUNTAIN_TZ)
+    hour = int(now.strftime("%I"))
+    return now.strftime(f"%Y-%m-%d {hour}:%M:%S %p MT")
+
+
+def main() -> int:
+    install_run_log("Get_Closes_ToS")
     if xw is None:
-        print("xlwings is not installed. Install it with: pip install xlwings")
-        return
+        print("ERROR: xlwings is not installed. Install it with: pip install xlwings")
+        return 1
     if not os.path.exists(SOURCE_FILE):
-        print(f"Source file not found: {SOURCE_FILE}")
-        return
+        print(f"ERROR: Source file not found: {SOURCE_FILE}")
+        return 1
 
     app = None
     wb = None
     owned_app = False
     owned_book = False
     did_save = False
+    exit_code = 1
     try:
-        app, wb, owned_app, owned_book = open_or_attach_earnings_workbook(SOURCE_FILE)
+        try:
+            app, wb, owned_app, owned_book = open_or_attach_earnings_workbook(
+                SOURCE_FILE
+            )
+        except Exception as e:
+            print(f"FAIL: could not open or attach to Latest Earnings: {e}")
+            return 1
+
+        if owned_book:
+            print("Opened Latest Earnings in hidden Excel (will close after save).")
+        else:
+            print(
+                "Attached to Latest Earnings already open in Excel "
+                "(will save; leave your window open)."
+            )
+
         try:
             sheet = wb.sheets[SOURCE_SHEET]
         except Exception:
-            print(f"Sheet '{SOURCE_SHEET}' not found in {SOURCE_FILE}.")
-            return
+            print(f"ERROR: Sheet '{SOURCE_SHEET}' not found in {SOURCE_FILE}.")
+            return 1
 
         try:
             max_row = sheet.used_range.last_cell.row
@@ -206,13 +236,20 @@ def main() -> None:
             tickers_to_fetch.append(ticker)
 
         if not to_process:
-            print("No closing ranges found.")
-            sys.exit(0)
+            print(
+                "FAIL: No closing ranges found (no M2/M1/C…0 chain with tickers). "
+                "Not recording success."
+            )
+            return 1
 
-        print(f"Fetching closing prices for {len(tickers_to_fetch)} ticker(s) from Schwab daily candles...")
+        print(
+            f"Fetching closing prices for {len(tickers_to_fetch)} ticker(s) "
+            f"from Schwab daily candles..."
+        )
         prices = _fetch_closes_via_schwab(tickers_to_fetch)
 
         tickers_by_column: Dict[str, List[str]] = {COL_V: [], COL_U: [], COL_S: []}
+        written_count = 0
         for row, ticker, target_col in to_process:
             price = prices.get(ticker)
             if price is None:
@@ -221,19 +258,40 @@ def main() -> None:
             if not DRY_RUN:
                 sheet.range(f"{target_col}{row}").value = price
             tickers_by_column[target_col].append(ticker)
+            written_count += 1
 
         if DRY_RUN:
             print("DRY_RUN is True: no workbook writes were made.")
+            exit_code = 0
+        elif written_count == 0:
+            print(
+                "FAIL: Get_Closes completed with no prices written (fetch miss). "
+                "Not saving; not recording success."
+            )
+            return 1
         else:
-            wb.save()
+            try:
+                wb.save()
+            except Exception as e:
+                print(f"FAIL: could not save Latest Earnings after writing closes: {e}")
+                return 1
             did_save = True
-            print("Closing prices written to Latest Earnings (saved via Excel).")
+            stamp = _save_stamp_mt()
+            print(
+                f"SAVE OK: Closing prices written to Latest Earnings "
+                f"({written_count} ticker(s)). Save timestamp: {stamp}"
+            )
             write_closes_success()
+            exit_code = 0
 
         print("\nTickers resolved by column:")
         for col in (COL_V, COL_U, COL_S):
             tickers = tickers_by_column[col]
             print(f"  Column {col}: {', '.join(tickers) if tickers else '(none)'}")
+        return exit_code
+    except Exception as e:
+        print(f"FAIL: Get_Closes_ToS crashed: {e}")
+        return 1
     finally:
         release_earnings_workbook(app, wb, owned_app=owned_app, owned_book=owned_book)
         if did_save:
@@ -241,4 +299,4 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

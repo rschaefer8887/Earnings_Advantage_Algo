@@ -1,0 +1,17 @@
+# Keep working-copy line endings as LF so Git does not warn on Windows.
+root = true
+
+[*]
+end_of_line = lf
+insert_final_newline = true
+charset = utf-8
+
+[*.{py,pyi,pyw}]
+indent_style = space
+indent_size = 4
+
+[*.{bat,cmd}]
+end_of_line = lf
+
+[*.{xlsx,xls,xlsm,pdf,png,jpg,jpeg,gif,zip,exe,dll,pkl,parquet}]
+end_of_line = unset

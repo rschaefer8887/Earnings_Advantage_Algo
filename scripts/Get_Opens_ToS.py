@@ -2,19 +2,24 @@
 
 Standalone script that fetches daily opens via Schwab/ToS API.
 
-If Latest Earnings is already open in Excel, attaches to that workbook; otherwise
-opens it in a hidden Excel instance.
+If Latest Earnings is already open in Excel, attaches and saves that session;
+otherwise opens a hidden Excel instance. Leaves a user-owned workbook open.
 
 Workbook logic (Trades sheet):
   - Column K: earnings date
   - Column P: first "O" starts the range, "0" stops.
   - Column A: ticker per row.
   - Column T: opening price target.
+
+Success stamp is written only after prices are written and wb.save() succeeds.
+Empty/no-work runs exit non-zero so Task Scheduler does not report success.
 """
 
 import os
 import time
+from datetime import datetime
 from typing import Dict, List, Optional, Tuple
+from zoneinfo import ZoneInfo
 
 try:
     import xlwings as xw
@@ -28,6 +33,9 @@ from earnings_workbook_utils import (
     release_earnings_workbook,
 )
 from price_run_timestamps import write_opens_success
+from run_logging import install_run_log
+
+MOUNTAIN_TZ = ZoneInfo("America/Denver")
 
 _SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 _BASE_DIR = os.path.dirname(_SCRIPT_DIR)
@@ -136,26 +144,49 @@ def _fetch_opens_via_schwab(tickers: List[str]) -> Dict[str, Optional[float]]:
     return result
 
 
-def main() -> None:
+def _save_stamp_mt() -> str:
+    now = datetime.now(MOUNTAIN_TZ)
+    hour = int(now.strftime("%I"))
+    return now.strftime(f"%Y-%m-%d {hour}:%M:%S %p MT")
+
+
+def main() -> int:
+    install_run_log("Get_Opens_ToS")
     if xw is None:
-        print("xlwings is not installed. Install it with: pip install xlwings")
-        return
+        print("ERROR: xlwings is not installed. Install it with: pip install xlwings")
+        return 1
     if not os.path.exists(SOURCE_FILE):
-        print(f"Source file not found: {SOURCE_FILE}")
-        return
+        print(f"ERROR: Source file not found: {SOURCE_FILE}")
+        return 1
 
     app = None
     wb = None
     owned_app = False
     owned_book = False
     did_save = False
+    exit_code = 1
     try:
-        app, wb, owned_app, owned_book = open_or_attach_earnings_workbook(SOURCE_FILE)
+        try:
+            app, wb, owned_app, owned_book = open_or_attach_earnings_workbook(
+                SOURCE_FILE
+            )
+        except Exception as e:
+            print(f"FAIL: could not open or attach to Latest Earnings: {e}")
+            return 1
+
+        if owned_book:
+            print("Opened Latest Earnings in hidden Excel (will close after save).")
+        else:
+            print(
+                "Attached to Latest Earnings already open in Excel "
+                "(will save; leave your window open)."
+            )
+
         try:
             sheet = wb.sheets[SOURCE_SHEET]
         except Exception:
-            print(f"Sheet '{SOURCE_SHEET}' not found in {SOURCE_FILE}.")
-            return
+            print(f"ERROR: Sheet '{SOURCE_SHEET}' not found in {SOURCE_FILE}.")
+            return 1
 
         try:
             max_row = sheet.used_range.last_cell.row
@@ -180,16 +211,20 @@ def main() -> None:
                 first_o_row = row
                 break
 
-        # Successful run with nothing to write still stamps (evening QC needs today's opens stamp).
         if first_o_row is None:
-            print("No 'O' flag found in column P. Nothing to process.")
-            if not DRY_RUN:
-                write_opens_success()
-            return
+            print(
+                "FAIL: No 'O' flag found in column P. Nothing to process. "
+                "Not recording success."
+            )
+            return 1
 
         if count_o != 1 or count_zero != 1:
-            print("One clean range is not selected, please clean up your open range and try again.")
-            return
+            print(
+                "FAIL: One clean range is not selected "
+                f"(found O={count_o}, 0={count_zero}). "
+                "Clean up column P and try again. Not recording success."
+            )
+            return 1
 
         to_process: List[Tuple[int, str]] = []
         for row in range(first_o_row, max_row + 1):
@@ -202,13 +237,17 @@ def main() -> None:
             to_process.append((row, ticker))
 
         if not to_process:
-            print("No tickers found in rows between 'O' and '0' in column P.")
-            if not DRY_RUN:
-                write_opens_success()
-            return
+            print(
+                "FAIL: No tickers found in rows between 'O' and '0' in column P. "
+                "Not recording success."
+            )
+            return 1
 
         tickers_to_fetch = [t for _, t in to_process]
-        print(f"Fetching opening prices for {len(tickers_to_fetch)} ticker(s) from Schwab daily candles...")
+        print(
+            f"Fetching opening prices for {len(tickers_to_fetch)} ticker(s) "
+            f"from Schwab daily candles..."
+        )
         prices = _fetch_opens_via_schwab(tickers_to_fetch)
 
         written: List[str] = []
@@ -223,19 +262,36 @@ def main() -> None:
 
         if DRY_RUN:
             print("DRY_RUN is True: no workbook writes were made.")
+            exit_code = 0
+        elif not written:
+            print(
+                "FAIL: Get_Opens completed with no prices written (fetch miss). "
+                "Not saving; not recording success."
+            )
+            return 1
         else:
-            wb.save()
+            try:
+                wb.save()
+            except Exception as e:
+                print(f"FAIL: could not save Latest Earnings after writing opens: {e}")
+                return 1
             did_save = True
-            if written:
-                print("Opening prices written to Latest Earnings (saved via Excel).")
-            else:
-                print("Get_Opens completed with no prices written (fetch miss); still recording success.")
+            stamp = _save_stamp_mt()
+            print(
+                f"SAVE OK: Opening prices written to Latest Earnings "
+                f"({len(written)} ticker(s)). Save timestamp: {stamp}"
+            )
             write_opens_success()
+            exit_code = 0
 
         print(
             f"\nTickers resolved for column {COL_OPENING_PRICE}: "
             f"{', '.join(written) if written else '(none)'}"
         )
+        return exit_code
+    except Exception as e:
+        print(f"FAIL: Get_Opens_ToS crashed: {e}")
+        return 1
     finally:
         release_earnings_workbook(app, wb, owned_app=owned_app, owned_book=owned_book)
         if did_save:
@@ -243,4 +299,4 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

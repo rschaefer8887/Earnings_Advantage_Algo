@@ -13,13 +13,17 @@ env/
 
 # IDE / editor
 .idea/
-.vscode/
+.vscode/*
+!.vscode/settings.json
 *.swp
 *.swo
 
 # OS
 Thumbs.db
 .DS_Store
+
+# Job run logs (local diagnostics)
+Admin/Logs/
 
 # Local / generated (uncomment if you don't want to track these)
 # *.xlsx

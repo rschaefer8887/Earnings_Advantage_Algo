@@ -1,8 +1,8 @@
 """
 Utilities to re-read exit-type values from the Latest Earnings workbook.
 
-Used by exit scripts so that Live_Trade_Info D/E columns are refreshed from the
-Latest Earnings Document just before placing orders.
+Archived under Old Scripts (no longer used by Exit_ToS / Exit_ToS2). Kept for
+Exit_IB_via_GW and possible future reuse.
 
 Reads via openpyxl when the file is closed. If the workbook is open in Excel
 (Windows file lock), falls back to xlwings without closing the user's workbook.
@@ -17,7 +17,8 @@ from openpyxl import load_workbook
 
 
 def _base_dir() -> str:
-    return os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    # scripts/Old Scripts/this_file.py -> repo root
+    return os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 
 LATEST_EARNINGS_FILE = os.path.join(_base_dir(), "! -- Latest Earnings Document.xlsx")

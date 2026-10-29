@@ -42,15 +42,22 @@ except ImportError:
     xw = None
 
 from datetime import datetime
-
-from live_trade_info_utils import MODE_SINGLE_DAY, TRADE_MODE_CELL, TRADE_MODE_SHEET
-from earnings_exit_type_utils import read_exit_types_from_latest_earnings
+import sys
 
 # ---------------------------------------------------------------------------
 # Paths
 # ---------------------------------------------------------------------------
-_SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-_BASE_DIR = os.path.dirname(_SCRIPT_DIR)
+_SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))  # scripts/Old Scripts
+_SCRIPTS_DIR = os.path.dirname(_SCRIPT_DIR)  # scripts/
+_BASE_DIR = os.path.dirname(_SCRIPTS_DIR)  # repo root
+
+# live_trade_info_utils lives in scripts/; this util lives beside this file.
+for _p in (_SCRIPT_DIR, _SCRIPTS_DIR):
+    if _p not in sys.path:
+        sys.path.insert(0, _p)
+
+from live_trade_info_utils import MODE_SINGLE_DAY, TRADE_MODE_CELL, TRADE_MODE_SHEET
+from earnings_exit_type_utils import read_exit_types_from_latest_earnings
 
 # ---------------------------------------------------------------------------
 # Configuration
