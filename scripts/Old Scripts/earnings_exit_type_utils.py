@@ -21,7 +21,7 @@ def _base_dir() -> str:
     return os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 
-LATEST_EARNINGS_FILE = os.path.join(_base_dir(), "! -- Latest Earnings Document.xlsx")
+LATEST_EARNINGS_FILE = os.path.join(_base_dir(), "! -- Latest Earnings Season.xlsx")
 LATEST_EARNINGS_SHEET = "Trades"
 
 # Stage_Trades_Auto uses:
@@ -183,7 +183,7 @@ def _read_columns_xlwings(
         import xlwings as xw
     except ImportError as e:
         raise PermissionError(
-            "Latest Earnings Document is open in Excel and xlwings is not installed. "
+            "Latest Earnings Season is open in Excel and xlwings is not installed. "
             "Install xlwings or close the workbook and try again."
         ) from e
 
@@ -206,7 +206,7 @@ def _read_columns_xlwings(
             except Exception:
                 pass
             raise PermissionError(
-                "Could not read Latest Earnings Document (file may be locked). "
+                "Could not read Latest Earnings Season (file may be locked). "
                 "Please close it in Excel and try again."
             ) from e
 
@@ -261,7 +261,7 @@ def read_exit_types_from_latest_earnings(
     earnings_sheet: str = LATEST_EARNINGS_SHEET,
 ) -> Dict[str, Dict[str, str]]:
     """
-    Read exit-type values from Latest Earnings Document.
+    Read exit-type values from Latest Earnings Season.
 
     Returns a dict keyed by ticker_upper:
         {
@@ -299,7 +299,7 @@ def read_exit_types_from_latest_earnings(
             raise
         except Exception as e:
             raise PermissionError(
-                "Could not read Latest Earnings Document while it is open in Excel. "
+                "Could not read Latest Earnings Season while it is open in Excel. "
                 "Please save and close the workbook, or ensure xlwings can connect to Excel."
             ) from e
 

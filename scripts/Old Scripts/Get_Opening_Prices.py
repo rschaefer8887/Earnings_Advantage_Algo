@@ -27,7 +27,7 @@ _BASE_DIR = os.path.dirname(os.path.dirname(_SCRIPT_DIR))
 # ---------------------------------------------------------------------------
 # Configuration — update source file path when you refresh your earnings file
 # ---------------------------------------------------------------------------
-source_file = os.path.join(_BASE_DIR, "! -- Latest Earnings Document.xlsx")
+source_file = os.path.join(_BASE_DIR, "! -- Latest Earnings Season.xlsx")
 source_sheet = "Trades"  # Sheet that contains the ticker list
 header_row = 3  # Row index where column headers live (tickers start below this)
 ticker_column_letter = "A"  # Column containing ticker symbols

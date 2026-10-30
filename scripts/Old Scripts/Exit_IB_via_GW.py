@@ -302,7 +302,7 @@ def main() -> int:
         # (Multi-day mode still filters earnings by 1..5, but we only write back to the current sheet.)
         target_sheet_names = [sheet_name]
         try:
-            print("\nRefreshing IB exit types from Latest Earnings Document (AB)...")
+            print("\nRefreshing IB exit types from Latest Earnings Season (AB)...")
             lookup = read_exit_types_from_latest_earnings(single_day=single_day_mode)
         except Exception as e:
             print(f"Failed to refresh exit types from Latest Earnings: {e}")

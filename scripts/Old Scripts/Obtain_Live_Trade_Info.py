@@ -4,7 +4,7 @@ Obtain Live Trade Info
 Reads tickers and trade parameters from the Earnings workbook and writes them
 to a Live_Trade_Info workbook that will later be used to send live orders.
 
-Source layout (! -- Latest Earnings Document.xlsx):
+Source layout (! -- Latest Earnings Season.xlsx):
 - Column A: Ticker
 - Column Y: Trade Direction ("long" or "short")
 - Column Z: Share Size
@@ -34,7 +34,7 @@ _BASE_DIR = os.path.dirname(os.path.dirname(_SCRIPT_DIR))
 # Configuration — update paths/sheet/columns as needed
 # ---------------------------------------------------------------------------
 # Path to the Earnings workbook (e.g. quarterly earnings / trade setup file).
-source_file = os.path.join(_BASE_DIR, "! -- Latest Earnings Document.xlsx")
+source_file = os.path.join(_BASE_DIR, "! -- Latest Earnings Season.xlsx")
 # Sheet name that contains the ticker list and trade direction/size.
 source_sheet = "Trades"  # Sheet that contains the trade setup
 # Row index where column headers live; data rows start below this.

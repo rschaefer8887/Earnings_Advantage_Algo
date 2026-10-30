@@ -5,6 +5,9 @@ Standalone script that fetches daily opens via Schwab/ToS API.
 If Latest Earnings is already open in Excel, attaches and saves that session;
 otherwise opens a hidden Excel instance. Leaves a user-owned workbook open.
 
+Workbook is released during Schwab fetches when this script owns Excel, so
+OneDrive is not locked for minutes.
+
 Workbook logic (Trades sheet):
   - Column K: earnings date
   - Column P: first "O" starts the range, "0" stops.
@@ -40,7 +43,7 @@ MOUNTAIN_TZ = ZoneInfo("America/Denver")
 _SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 _BASE_DIR = os.path.dirname(_SCRIPT_DIR)
 
-SOURCE_FILE = os.path.join(_BASE_DIR, "! -- Latest Earnings Document.xlsx")
+SOURCE_FILE = os.path.join(_BASE_DIR, "! -- Latest Earnings Season.xlsx")
 SOURCE_SHEET = "Trades"
 HEADER_ROW = 3
 COL_TICKER = "A"
@@ -150,6 +153,68 @@ def _save_stamp_mt() -> str:
     return now.strftime(f"%Y-%m-%d {hour}:%M:%S %p MT")
 
 
+def _collect_open_jobs(sheet) -> Tuple[Optional[str], List[Tuple[int, str]]]:
+    """
+    Validate P O...0 and return (error_message_or_None, jobs).
+    """
+    try:
+        max_row = sheet.used_range.last_cell.row
+    except Exception:
+        max_row = 2000
+    start_row = HEADER_ROW + 1
+
+    count_o = 0
+    count_zero = 0
+    end_check = min(max_row, CHECK_END_ROW)
+    for row in range(start_row, end_check + 1):
+        cell_val = sheet.range(f"{COL_FLAG}{row}").value
+        if _is_start_flag(cell_val):
+            count_o += 1
+        elif _is_stop_flag(cell_val):
+            count_zero += 1
+
+    first_o_row = None
+    for row in range(start_row, max_row + 1):
+        cell_val = sheet.range(f"{COL_FLAG}{row}").value
+        if _is_start_flag(cell_val):
+            first_o_row = row
+            break
+
+    if first_o_row is None:
+        return (
+            "FAIL: No 'O' flag found in column P. Nothing to process. "
+            "Not recording success.",
+            [],
+        )
+
+    if count_o != 1 or count_zero != 1:
+        return (
+            "FAIL: One clean range is not selected "
+            f"(found O={count_o}, 0={count_zero}). "
+            "Clean up column P and try again. Not recording success.",
+            [],
+        )
+
+    to_process: List[Tuple[int, str]] = []
+    for row in range(first_o_row, max_row + 1):
+        cell_val = sheet.range(f"{COL_FLAG}{row}").value
+        if _is_stop_flag(cell_val):
+            break
+        ticker = _normalize_ticker(sheet.range(f"{COL_TICKER}{row}").value)
+        if not ticker:
+            continue
+        to_process.append((row, ticker))
+
+    if not to_process:
+        return (
+            "FAIL: No tickers found in rows between 'O' and '0' in column P. "
+            "Not recording success.",
+            [],
+        )
+
+    return None, to_process
+
+
 def main() -> int:
     install_run_log("Get_Opens_ToS")
     if xw is None:
@@ -165,6 +230,9 @@ def main() -> int:
     owned_book = False
     did_save = False
     exit_code = 1
+    to_process: List[Tuple[int, str]] = []
+    held_through_fetch = False
+
     try:
         try:
             app, wb, owned_app, owned_book = open_or_attach_earnings_workbook(
@@ -175,12 +243,13 @@ def main() -> int:
             return 1
 
         if owned_book:
-            print("Opened Latest Earnings in hidden Excel (will close after save).")
+            print("Opened Latest Earnings in hidden Excel (read jobs, then release).")
         else:
             print(
                 "Attached to Latest Earnings already open in Excel "
                 "(will save; leave your window open)."
             )
+            held_through_fetch = True
 
         try:
             sheet = wb.sheets[SOURCE_SHEET]
@@ -188,60 +257,22 @@ def main() -> int:
             print(f"ERROR: Sheet '{SOURCE_SHEET}' not found in {SOURCE_FILE}.")
             return 1
 
-        try:
-            max_row = sheet.used_range.last_cell.row
-        except Exception:
-            max_row = 2000
-        start_row = HEADER_ROW + 1
-
-        count_o = 0
-        count_zero = 0
-        end_check = min(max_row, CHECK_END_ROW)
-        for row in range(start_row, end_check + 1):
-            cell_val = sheet.range(f"{COL_FLAG}{row}").value
-            if _is_start_flag(cell_val):
-                count_o += 1
-            elif _is_stop_flag(cell_val):
-                count_zero += 1
-
-        first_o_row = None
-        for row in range(start_row, max_row + 1):
-            cell_val = sheet.range(f"{COL_FLAG}{row}").value
-            if _is_start_flag(cell_val):
-                first_o_row = row
-                break
-
-        if first_o_row is None:
-            print(
-                "FAIL: No 'O' flag found in column P. Nothing to process. "
-                "Not recording success."
-            )
+        err, to_process = _collect_open_jobs(sheet)
+        if err:
+            print(err)
             return 1
 
-        if count_o != 1 or count_zero != 1:
-            print(
-                "FAIL: One clean range is not selected "
-                f"(found O={count_o}, 0={count_zero}). "
-                "Clean up column P and try again. Not recording success."
+        if owned_book:
+            release_earnings_workbook(
+                app,
+                wb,
+                owned_app=owned_app,
+                owned_book=owned_book,
+                earnings_file=SOURCE_FILE,
             )
-            return 1
-
-        to_process: List[Tuple[int, str]] = []
-        for row in range(first_o_row, max_row + 1):
-            cell_val = sheet.range(f"{COL_FLAG}{row}").value
-            if _is_stop_flag(cell_val):
-                break
-            ticker = _normalize_ticker(sheet.range(f"{COL_TICKER}{row}").value)
-            if not ticker:
-                continue
-            to_process.append((row, ticker))
-
-        if not to_process:
-            print(
-                "FAIL: No tickers found in rows between 'O' and '0' in column P. "
-                "Not recording success."
-            )
-            return 1
+            app, wb = None, None
+            owned_app, owned_book = False, False
+            print("Released Excel during Schwab fetch (avoids OneDrive lock).")
 
         tickers_to_fetch = [t for _, t in to_process]
         print(
@@ -249,6 +280,24 @@ def main() -> int:
             f"from Schwab daily candles..."
         )
         prices = _fetch_opens_via_schwab(tickers_to_fetch)
+
+        if not held_through_fetch:
+            try:
+                app, wb, owned_app, owned_book = open_or_attach_earnings_workbook(
+                    SOURCE_FILE
+                )
+            except Exception as e:
+                print(f"FAIL: could not re-open Latest Earnings for write: {e}")
+                return 1
+            if owned_book:
+                print("Re-opened Latest Earnings in hidden Excel for write/save.")
+            try:
+                sheet = wb.sheets[SOURCE_SHEET]
+            except Exception:
+                print(f"ERROR: Sheet '{SOURCE_SHEET}' not found in {SOURCE_FILE}.")
+                return 1
+        else:
+            sheet = wb.sheets[SOURCE_SHEET]
 
         written: List[str] = []
         for row, ticker in to_process:
@@ -293,7 +342,13 @@ def main() -> int:
         print(f"FAIL: Get_Opens_ToS crashed: {e}")
         return 1
     finally:
-        release_earnings_workbook(app, wb, owned_app=owned_app, owned_book=owned_book)
+        release_earnings_workbook(
+            app,
+            wb,
+            owned_app=owned_app,
+            owned_book=owned_book,
+            earnings_file=SOURCE_FILE,
+        )
         if did_save:
             nudge_onedrive_sync(SOURCE_FILE)
 

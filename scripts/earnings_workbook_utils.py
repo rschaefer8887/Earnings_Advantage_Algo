@@ -4,6 +4,10 @@ xlwings helpers for the Latest Earnings workbook.
 Attach to an already-open workbook in Excel when possible; otherwise open in a
 hidden Excel instance. Scripts that own the instance should call
 release_earnings_workbook() in a finally block.
+
+Prefer: open → read → release (if owned) → long API work → open → write/save →
+release. Holding Excel open across Schwab fetches causes OneDrive
+"someone else has it open" popups.
 """
 
 from __future__ import annotations
@@ -15,7 +19,7 @@ from typing import Any, Optional, Tuple
 _SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 _BASE_DIR = os.path.dirname(_SCRIPT_DIR)
 
-LATEST_EARNINGS_FILE = os.path.join(_BASE_DIR, "! -- Latest Earnings Document.xlsx")
+LATEST_EARNINGS_FILE = os.path.join(_BASE_DIR, "! -- Latest Earnings Season.xlsx")
 LATEST_EARNINGS_SHEET = "Trades"
 
 
@@ -132,7 +136,7 @@ def open_or_attach_earnings_workbook(
 
     existing = find_open_earnings_workbook(earnings_file)
     if existing is not None:
-        print("Using open Latest Earnings Document in Excel.")
+        print("Using open Latest Earnings Season in Excel.")
         return None, existing, False, False
 
     abs_path = os.path.abspath(earnings_file)
@@ -151,7 +155,7 @@ def open_or_attach_earnings_workbook(
             pass
         existing = find_open_earnings_workbook(earnings_file)
         if existing is not None:
-            print("Using open Latest Earnings Document in Excel.")
+            print("Using open Latest Earnings Season in Excel.")
             return None, existing, False, False
         raise RuntimeError(
             "Could not open or attach to Latest Earnings workbook. "
@@ -161,14 +165,63 @@ def open_or_attach_earnings_workbook(
     return app, wb, True, True
 
 
+def office_lock_path(file_path: str) -> str:
+    """Office lock companion (~$Name.xlsx) next to the workbook."""
+    abs_path = os.path.abspath(file_path)
+    directory, name = os.path.split(abs_path)
+    return os.path.join(directory, f"~${name}")
+
+
+def clear_office_lock_file(file_path: str) -> bool:
+    """
+    Remove a leftover Office ~$ lock file if present.
+    Safe no-op when missing or still in use.
+    """
+    lock = office_lock_path(file_path)
+    if not os.path.isfile(lock):
+        return False
+    try:
+        os.remove(lock)
+        print(f"  Cleared stale Office lock: {os.path.basename(lock)}")
+        return True
+    except OSError as e:
+        print(f"  Warning: could not remove Office lock ({e})")
+        return False
+
+
+def wait_until_file_unlocked(
+    file_path: str, *, timeout_sec: float = 60.0, poll_sec: float = 0.25
+) -> bool:
+    """
+    Return True once the file can be opened for append (Excel released it).
+    """
+    abs_path = os.path.abspath(file_path)
+    if not os.path.isfile(abs_path):
+        return True
+    deadline = time.time() + max(0.0, timeout_sec)
+    while True:
+        try:
+            with open(abs_path, "a"):
+                pass
+            return True
+        except OSError:
+            if time.time() >= deadline:
+                return False
+            time.sleep(poll_sec)
+
+
 def release_earnings_workbook(
     app: Optional[Any],
     wb: Optional[Any],
     *,
     owned_app: bool,
     owned_book: bool,
+    earnings_file: Optional[str] = None,
 ) -> None:
-    """Close workbook and quit Excel only when this script opened them."""
+    """
+    Close workbook and quit Excel only when this script opened them.
+    Then wait briefly for the OS handle to drop and clear a stale ~$ lock.
+    """
     if owned_book and wb is not None:
         try:
             wb.close()
@@ -179,25 +232,32 @@ def release_earnings_workbook(
             app.quit()
         except Exception:
             pass
+        # COM often keeps the file lock for a beat after quit returns.
+        time.sleep(0.75)
+
+    if owned_book and earnings_file:
+        wait_until_file_unlocked(earnings_file, timeout_sec=20.0)
+        clear_office_lock_file(earnings_file)
 
 
-def nudge_onedrive_sync(file_path: str, *, settle_seconds: float = 0.75) -> None:
+def nudge_onedrive_sync(file_path: str, *, settle_seconds: float = 1.5) -> None:
     """
-    Wake OneDrive after a headless Excel COM save.
+    After a headless Excel save/quit: wait until the file is unlocked so OneDrive
+    can sync without fighting Excel.
 
-    Hidden Excel often updates the local file without the sync client noticing
-    until something else touches it. Bumping mtime after Excel has released the
-    handle (no UI) usually starts upload sooner. Safe no-op if the path is
-    missing or still locked.
+    Intentionally does NOT bump mtime — that used to force sync while the lock
+    was still contested and triggered "someone else has it open" popups.
     """
     abs_path = os.path.abspath(file_path)
     if not os.path.isfile(abs_path):
         return
     if settle_seconds > 0:
         time.sleep(settle_seconds)
-    try:
-        now = time.time()
-        os.utime(abs_path, (now, now))
-        print(f"  Nudged OneDrive sync: {os.path.basename(abs_path)}")
-    except OSError as e:
-        print(f"  Warning: could not nudge OneDrive sync ({e})")
+    if wait_until_file_unlocked(abs_path, timeout_sec=45.0):
+        clear_office_lock_file(abs_path)
+        print(f"  Earnings file unlocked for sync: {os.path.basename(abs_path)}")
+    else:
+        print(
+            f"  Warning: {os.path.basename(abs_path)} still locked after wait; "
+            "OneDrive may show a temporary lock dialog."
+        )

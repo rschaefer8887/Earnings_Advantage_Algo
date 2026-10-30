@@ -31,7 +31,7 @@ _BASE_DIR = os.path.dirname(os.path.dirname(_SCRIPT_DIR))
 # ---------------------------------------------------------------------------
 # Configuration
 # ---------------------------------------------------------------------------
-SOURCE_FILE = os.path.join(_BASE_DIR, "! -- Latest Earnings Document.xlsx")
+SOURCE_FILE = os.path.join(_BASE_DIR, "! -- Latest Earnings Season.xlsx")
 SOURCE_SHEET = "Trades"
 HEADER_ROW = 3  # Data starts the row after headers (e.g. row 4)
 COL_TICKER = "A"

@@ -4,7 +4,7 @@ cd /d "C:\Users\ryanc\OneDrive\repos\Trading_Algo\scripts"
 
 set "PY=C:\Users\ryanc\AppData\Local\Python\pythoncore-3.14-64\python.exe"
 set "LOG=C:\Users\ryanc\OneDrive\repos\Trading_Algo\Admin\Logs\Get_Actual_MKT_Open_Prices.log"
-set "EARNINGS=C:\Users\ryanc\OneDrive\repos\Trading_Algo\! -- Latest Earnings Document.xlsx"
+set "EARNINGS=C:\Users\ryanc\OneDrive\repos\Trading_Algo\! -- Latest Earnings Season.xlsx"
 
 if not exist "C:\Users\ryanc\OneDrive\repos\Trading_Algo\Admin\Logs" mkdir "C:\Users\ryanc\OneDrive\repos\Trading_Algo\Admin\Logs"
 
@@ -18,7 +18,7 @@ timeout /t 10 /nobreak >nul
 
 echo Running Get_Actual_MKT_Open_Prices.py (script tees its own log) >> "%LOG%"
 set "ALGO_SCHEDULED=1"
-REM Do not redirect stdout here â€” the .py appends to the same log via run_logging.
+REM Do not redirect stdout here — the .py appends to the same log via run_logging.
 "%PY%" "Get_Actual_MKT_Open_Prices.py"
 set "EXIT_CODE=%ERRORLEVEL%"
 echo Exit code: %EXIT_CODE% >> "%LOG%"

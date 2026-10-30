@@ -49,7 +49,7 @@ MOUNTAIN_TZ = ZoneInfo("America/Denver")
 _SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 _BASE_DIR = os.path.dirname(_SCRIPT_DIR)
 
-SOURCE_FILE = os.path.join(_BASE_DIR, "! -- Latest Earnings Document.xlsx")
+SOURCE_FILE = os.path.join(_BASE_DIR, "! -- Latest Earnings Season.xlsx")
 SOURCE_SHEET = "Trades"
 HEADER_ROW = 3
 
@@ -473,7 +473,13 @@ def main() -> int:
         print(f"FAIL: Get_Actual_MKT_Open_Prices crashed: {e}")
         return 1
     finally:
-        release_earnings_workbook(app, wb, owned_app=owned_app, owned_book=owned_book)
+        release_earnings_workbook(
+            app,
+            wb,
+            owned_app=owned_app,
+            owned_book=owned_book,
+            earnings_file=SOURCE_FILE,
+        )
         if did_save:
             nudge_onedrive_sync(SOURCE_FILE)
 

@@ -46,7 +46,7 @@ _BASE_DIR = os.path.dirname(_SCRIPT_DIR)
 # ---------------------------------------------------------------------------
 # Configuration
 # ---------------------------------------------------------------------------
-SOURCE_FILE = os.path.join(_BASE_DIR, "! -- Latest Earnings Document.xlsx")
+SOURCE_FILE = os.path.join(_BASE_DIR, "! -- Latest Earnings Season.xlsx")
 SOURCE_SHEET = "Trades"
 HEADER_ROW = 3  # Data starts the row after headers (e.g. row 4)
 COL_FLAG = "O"
@@ -337,8 +337,14 @@ def _stage_full_auto() -> None:
         print(f"Full_Auto staging/flagging failed: {e}")
         sys.exit(1)
     finally:
-        release_earnings_workbook(app, wb, owned_app=owned_app, owned_book=owned_book)
-        # After headless Excel quits, bump mtime so OneDrive notices the COM save.
+        release_earnings_workbook(
+            app,
+            wb,
+            owned_app=owned_app,
+            owned_book=owned_book,
+            earnings_file=SOURCE_FILE,
+        )
+        # Wait until Excel released the file so OneDrive can sync without lock fights.
         if did_save_earnings:
             nudge_onedrive_sync(SOURCE_FILE)
 
@@ -477,7 +483,7 @@ def main() -> None:
     try:
         wb_source = load_workbook(SOURCE_FILE, data_only=True)
     except PermissionError:
-        print("Please close Latest Earnings Document.")
+        print("Please close Latest Earnings Season.")
         return
 
     try:

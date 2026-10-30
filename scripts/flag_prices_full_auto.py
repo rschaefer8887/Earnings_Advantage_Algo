@@ -1572,7 +1572,11 @@ def flag_prices_full_auto(
     finally:
         if owns_workbook:
             release_earnings_workbook(
-                app, wb, owned_app=owned_app, owned_book=owned_book
+                app,
+                wb,
+                owned_app=owned_app,
+                owned_book=owned_book,
+                earnings_file=earnings_file,
             )
             if did_save:
                 nudge_onedrive_sync(earnings_file)
