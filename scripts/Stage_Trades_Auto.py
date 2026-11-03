@@ -27,6 +27,7 @@ from openpyxl.worksheet.worksheet import Worksheet
 warnings.filterwarnings("ignore", message=".*Unknown extension.*", category=UserWarning)
 warnings.filterwarnings("ignore", message=".*Conditional Formatting extension.*", category=UserWarning)
 
+from earnings_workbook_utils import LATEST_EARNINGS_FILE, LATEST_EARNINGS_SHEET
 from full_auto_utils import (
     MODE_FULL_AUTO,
     is_full_auto_mode,
@@ -46,8 +47,8 @@ _BASE_DIR = os.path.dirname(_SCRIPT_DIR)
 # ---------------------------------------------------------------------------
 # Configuration
 # ---------------------------------------------------------------------------
-SOURCE_FILE = os.path.join(_BASE_DIR, "! -- Latest Earnings Season.xlsx")
-SOURCE_SHEET = "Trades"
+SOURCE_FILE = LATEST_EARNINGS_FILE
+SOURCE_SHEET = LATEST_EARNINGS_SHEET
 HEADER_ROW = 3  # Data starts the row after headers (e.g. row 4)
 COL_FLAG = "O"
 COL_TICKER = "A"

@@ -30,6 +30,9 @@ except ImportError:
 
 from Schwab_Auth import create_client
 from earnings_workbook_utils import (
+    LATEST_EARNINGS_FILE,
+    LATEST_EARNINGS_SHEET,
+    backup_earnings_workbook,
     nudge_onedrive_sync,
     open_or_attach_earnings_workbook,
     release_earnings_workbook,
@@ -39,11 +42,8 @@ from run_logging import install_run_log
 
 MOUNTAIN_TZ = ZoneInfo("America/Denver")
 
-_SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-_BASE_DIR = os.path.dirname(_SCRIPT_DIR)
-
-SOURCE_FILE = os.path.join(_BASE_DIR, "! -- Latest Earnings Season.xlsx")
-SOURCE_SHEET = "Trades"
+SOURCE_FILE = LATEST_EARNINGS_FILE
+SOURCE_SHEET = LATEST_EARNINGS_SHEET
 HEADER_ROW = 3
 COL_TICKER = "A"
 COL_FLAG = "Q"
@@ -210,6 +210,8 @@ def main() -> int:
     if not os.path.exists(SOURCE_FILE):
         print(f"ERROR: Source file not found: {SOURCE_FILE}")
         return 1
+
+    backup_earnings_workbook(SOURCE_FILE, label="precloses")
 
     app = None
     wb = None

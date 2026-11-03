@@ -29,6 +29,9 @@ except ImportError:
 
 from Schwab_Auth import create_client
 from earnings_workbook_utils import (
+    LATEST_EARNINGS_FILE,
+    LATEST_EARNINGS_SHEET,
+    backup_earnings_workbook,
     nudge_onedrive_sync,
     open_or_attach_earnings_workbook,
     release_earnings_workbook,
@@ -40,11 +43,8 @@ MOUNTAIN_TZ = ZoneInfo("America/Denver")
 # shift a day earlier in MT and can match "today's" bar to yesterday's as-of).
 MARKET_TZ = ZoneInfo("America/New_York")
 
-_SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-_BASE_DIR = os.path.dirname(_SCRIPT_DIR)
-
-SOURCE_FILE = os.path.join(_BASE_DIR, "! -- Latest Earnings Season.xlsx")
-SOURCE_SHEET = "Trades"
+SOURCE_FILE = LATEST_EARNINGS_FILE
+SOURCE_SHEET = LATEST_EARNINGS_SHEET
 HEADER_ROW = 3
 CHECK_END_ROW = 550
 
@@ -476,6 +476,7 @@ def main() -> int:
         )
         if did_save:
             nudge_onedrive_sync(SOURCE_FILE)
+            backup_earnings_workbook(SOURCE_FILE)
 
 
 if __name__ == "__main__":

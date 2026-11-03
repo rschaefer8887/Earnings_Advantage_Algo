@@ -21,7 +21,7 @@ def _base_dir() -> str:
     return os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 
-LATEST_EARNINGS_FILE = os.path.join(_base_dir(), "! -- Latest Earnings Season.xlsx")
+LATEST_EARNINGS_FILE = r"C:\\Users\\ryanc\\! -- Trading\\! -- Latest Earnings Season.xlsx"
 LATEST_EARNINGS_SHEET = "Trades"
 
 # Stage_Trades_Auto uses:

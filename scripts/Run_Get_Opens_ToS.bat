@@ -4,7 +4,7 @@ cd /d "C:\Users\ryanc\OneDrive\repos\Trading_Algo\scripts"
 
 set "PY=C:\Users\ryanc\AppData\Local\Python\pythoncore-3.14-64\python.exe"
 set "LOG=C:\Users\ryanc\OneDrive\repos\Trading_Algo\Admin\Logs\Get_Opens_ToS.log"
-set "EARNINGS=C:\Users\ryanc\OneDrive\repos\Trading_Algo\! -- Latest Earnings Season.xlsx"
+set "EARNINGS=C:\Users\ryanc\! -- Trading\! -- Latest Earnings Season.xlsx"
 
 if not exist "C:\Users\ryanc\OneDrive\repos\Trading_Algo\Admin\Logs" mkdir "C:\Users\ryanc\OneDrive\repos\Trading_Algo\Admin\Logs"
 

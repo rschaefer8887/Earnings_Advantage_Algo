@@ -34,7 +34,7 @@ _BASE_DIR = os.path.dirname(os.path.dirname(_SCRIPT_DIR))
 # ---------------------------------------------------------------------------
 # Configuration
 # ---------------------------------------------------------------------------
-source_file = os.path.join(_BASE_DIR, "! -- Latest Earnings Season.xlsx")
+source_file = r"C:\\Users\\ryanc\\! -- Trading\\! -- Latest Earnings Season.xlsx"
 source_sheet = "Trades"
 header_row = 3
 ticker_column_letter = "A"

@@ -13,14 +13,59 @@ release. Holding Excel open across Schwab fetches causes OneDrive
 from __future__ import annotations
 
 import os
+import shutil
 import time
+from datetime import datetime
 from typing import Any, Optional, Tuple
+from zoneinfo import ZoneInfo
 
 _SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 _BASE_DIR = os.path.dirname(_SCRIPT_DIR)
 
-LATEST_EARNINGS_FILE = os.path.join(_BASE_DIR, "! -- Latest Earnings Season.xlsx")
+# Live workbook kept outside OneDrive to avoid sync/merge overwrites.
+LATEST_EARNINGS_DIR = r"C:\Users\ryanc\! -- Trading"
+LATEST_EARNINGS_FILE = os.path.join(
+    LATEST_EARNINGS_DIR, "! -- Latest Earnings Season.xlsx"
+)
 LATEST_EARNINGS_SHEET = "Trades"
+LATEST_EARNINGS_BACKUP_DIR = os.path.join(LATEST_EARNINGS_DIR, "zBackups")
+
+_MOUNTAIN_TZ = ZoneInfo("America/Denver")
+
+
+def backup_earnings_workbook(
+    file_path: Optional[str] = None,
+    *,
+    backup_dir: Optional[str] = None,
+    label: Optional[str] = None,
+) -> Optional[str]:
+    """
+    Copy the live Earnings workbook into zBackups with a Mountain timestamp.
+    Optional label (e.g. 'preopens', 'precloses', 'preMKT prices') is appended
+    before .xlsx. Returns backup path, or None on failure.
+    """
+    src = os.path.abspath(file_path or LATEST_EARNINGS_FILE)
+    dest_dir = backup_dir or LATEST_EARNINGS_BACKUP_DIR
+    if not os.path.isfile(src):
+        print(f"  Warning: backup skipped; missing {src}")
+        return None
+    try:
+        os.makedirs(dest_dir, exist_ok=True)
+    except OSError as e:
+        print(f"  Warning: could not create backup dir ({e})")
+        return None
+
+    stamp = datetime.now(_MOUNTAIN_TZ).strftime("%Y%m%d_%H%M%S")
+    suffix = f"_{label}" if label else ""
+    dest_name = f"! -- Latest Earnings Season_{stamp}{suffix}.xlsx"
+    dest = os.path.join(dest_dir, dest_name)
+    try:
+        shutil.copy2(src, dest)
+        print(f"  Backup saved: {dest}")
+        return dest
+    except OSError as e:
+        print(f"  Warning: earnings backup failed ({e})")
+        return None
 
 
 def _norm_basename(path: str) -> str:

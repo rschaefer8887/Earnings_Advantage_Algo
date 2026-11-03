@@ -34,7 +34,7 @@ _BASE_DIR = os.path.dirname(os.path.dirname(_SCRIPT_DIR))
 # Configuration — update paths/sheet/columns as needed
 # ---------------------------------------------------------------------------
 # Path to the Earnings workbook (e.g. quarterly earnings / trade setup file).
-source_file = os.path.join(_BASE_DIR, "! -- Latest Earnings Season.xlsx")
+source_file = r"C:\\Users\\ryanc\\! -- Trading\\! -- Latest Earnings Season.xlsx"
 # Sheet name that contains the ticker list and trade direction/size.
 source_sheet = "Trades"  # Sheet that contains the trade setup
 # Row index where column headers live; data rows start below this.
