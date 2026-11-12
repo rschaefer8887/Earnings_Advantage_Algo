@@ -15,7 +15,8 @@ Workbook logic (Trades sheet):
   - Column T: opening price target.
 
 Success stamp is written only after prices are written and wb.save() succeeds.
-Empty/no-work runs exit non-zero so Task Scheduler does not report success.
+No O and no 0 in column P (no open range) exits 0 so Task Scheduler is clean;
+success is not stamped in that case.
 """
 
 import os
@@ -153,9 +154,16 @@ def _save_stamp_mt() -> str:
     return now.strftime(f"%Y-%m-%d {hour}:%M:%S %p MT")
 
 
+# Sentinel from _collect_open_jobs: no P O and no P 0 at all (valid empty day).
+_NO_OPEN_RANGE = "NO_OPEN_RANGE"
+
+
 def _collect_open_jobs(sheet) -> Tuple[Optional[str], List[Tuple[int, str]]]:
     """
-    Validate P O...0 and return (error_message_or_None, jobs).
+    Validate P O...0 and return (status_or_None, jobs).
+
+    status None = ok; _NO_OPEN_RANGE = no range (clean exit);
+    other str = FAIL message (exit 1).
     """
     try:
         max_row = sheet.used_range.last_cell.row
@@ -179,6 +187,10 @@ def _collect_open_jobs(sheet) -> Tuple[Optional[str], List[Tuple[int, str]]]:
         if _is_start_flag(cell_val):
             first_o_row = row
             break
+
+    # No open range at all — normal when there were no live trades today.
+    if count_o == 0 and count_zero == 0:
+        return _NO_OPEN_RANGE, []
 
     if first_o_row is None:
         return (
@@ -260,6 +272,12 @@ def main() -> int:
             return 1
 
         err, to_process = _collect_open_jobs(sheet)
+        if err == _NO_OPEN_RANGE:
+            print(
+                "No open range in column P (no O and no 0). "
+                "No live opens to populate today. Exiting cleanly."
+            )
+            return 0
         if err:
             print(err)
             return 1

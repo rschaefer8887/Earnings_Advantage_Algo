@@ -33,6 +33,11 @@ Evening Stage (after successful Get_Opens + Get_Closes today, dests filled):
   clear completed flags and place as-of the next trading day.
 Morning Stage: place as-of calendar today.
 
+One-off live-open fallback (no Get_Opens stamp today, but Get_Closes OK and
+open orders went out this morning): place M1+O on today's weekday M-block
+whose column-K dates are within 1 calendar day of today (P O/0 with Q M1/C
+aligned). Does not require Get_Opens success.
+
 """
 
 from __future__ import annotations
@@ -875,6 +880,40 @@ def _evening_open_orders_ready(calendar_today: date) -> bool:
     return both_ok and live_ok
 
 
+def _place_m1_o_on_groups(
+    sheet,
+    groups: Sequence[Sequence[EarningsRow]],
+    *,
+    label: str,
+) -> Optional[int]:
+    """Write M1+O for each group; C/P-0 on the row after the block. Return last data row."""
+    if not groups:
+        return None
+    max_row = _sheet_max_row(sheet)
+    last_end: Optional[int] = None
+    for g in groups:
+        start_row = g[0].row
+        last_data_row = g[-1].row
+        tickers = ", ".join(r.ticker for r in g)
+        # Force M1+O even if T already has values (orders already live).
+        if _is_q_c_flag(sheet.range(f"{COL_Q}{start_row}").value):
+            sheet.range(f"{COL_Q}{start_row}").value = None
+        c_row = _ensure_c_row_for_m1_o(
+            sheet,
+            m1_start_row=start_row,
+            last_data_row=last_data_row,
+            max_row=max_row,
+        )
+        _write_q_start_only(sheet, "M1", start_row)
+        z_p = _write_o_range(sheet, start_row, c_row)
+        print(
+            f"  {label} O@{start_row} 0@{z_p}; Q M1@{start_row} ends at C@{c_row}; "
+            f"tickers: {tickers}"
+        )
+        last_end = last_data_row
+    return last_end
+
+
 def place_evening_entered_trade_flags(
     sheet,
     all_rows: Sequence[EarningsRow],
@@ -906,29 +945,70 @@ def place_evening_entered_trade_flags(
         f"\nEvening open-trades: placing M1+O for entered block(s) "
         f"M={token} D={calendar_today}..."
     )
+    return _place_m1_o_on_groups(
+        sheet, groups, label="Evening"
+    )
+
+
+def _k_within_one_day_of(sheet, row: int, calendar_today: date) -> bool:
+    k_date = parse_earnings_date(sheet.range(f"{COL_K}{row}").value)
+    if k_date is None:
+        return False
+    return abs((k_date - calendar_today).days) <= 1
+
+
+def _column_p_has_o(sheet) -> bool:
     max_row = _sheet_max_row(sheet)
-    last_end: Optional[int] = None
-    for g in groups:
-        start_row = g[0].row
-        last_data_row = g[-1].row
-        tickers = ", ".join(r.ticker for r in g)
-        # Force M1+O even if T already has values (orders already live).
-        if _is_q_c_flag(sheet.range(f"{COL_Q}{start_row}").value):
-            sheet.range(f"{COL_Q}{start_row}").value = None
-        c_row = _ensure_c_row_for_m1_o(
-            sheet,
-            m1_start_row=start_row,
-            last_data_row=last_data_row,
-            max_row=max_row,
-        )
-        _write_q_start_only(sheet, "M1", start_row)
-        z_p = _write_o_range(sheet, start_row, c_row)
+    for row in range(HEADER_ROW + 1, max_row + 1):
+        if _is_o_flag(sheet.range(f"{COL_P}{row}").value):
+            return True
+    return False
+
+
+def place_live_weekday_om1_fallback(
+    sheet,
+    all_rows: Sequence[EarningsRow],
+    calendar_today: date,
+) -> Optional[int]:
+    """
+    One-off: Get_Opens did not stamp today, but Get_Closes did and open orders
+    were sent this morning. Find contiguous M=today weekday block(s) whose
+    column-K dates are within 1 calendar day of today, then place M1+O with
+    C / P-0 on the next trade row (e.g. O@321 / 0@323 for a W block).
+    """
+    if _column_p_has_o(sheet):
         print(
-            f"  Evening O@{start_row} 0@{z_p}; Q M1@{start_row} ends at C@{c_row}; "
-            f"tickers: {tickers}"
+            "  Live-weekday O/M1 fallback: column P already has an O; skip."
         )
-        last_end = last_data_row
-    return last_end
+        return None
+
+    token = dow_abbrev_for_date(calendar_today)
+    candidates: List[List[EarningsRow]] = []
+    for g in _contiguous_groups(all_rows):
+        if g[0].m_token != token:
+            continue
+        if not all(_k_within_one_day_of(sheet, r.row, calendar_today) for r in g):
+            print(
+                f"  Live-weekday O/M1 fallback: skip M={token} rows "
+                f"{g[0].row}-{g[-1].row} (K not within 1 day of {calendar_today})."
+            )
+            continue
+        candidates.append(list(g))
+
+    if not candidates:
+        print(
+            f"  Live-weekday O/M1 fallback: no M={token} block with K within "
+            f"1 day of {calendar_today}; skip."
+        )
+        return None
+
+    print(
+        f"\nLive-weekday O/M1 fallback (no Opens stamp today; Closes+open-orders OK): "
+        f"placing M1+O for M={token} block(s) near {calendar_today}..."
+    )
+    return _place_m1_o_on_groups(
+        sheet, candidates, label="Live-weekday fallback"
+    )
 
 
 def lock_share_sizes_for_next_trading_day(
@@ -1414,10 +1494,14 @@ def _apply_flag_prices_to_sheet(sheet, calendar_today: date) -> Optional[date]:
 
     as_of = resolve_flag_as_of_date(sheet, calendar_today)
     evening = _is_evening_flag_mode(sheet, calendar_today)
+    _, opens_d, closes_d = opens_and_closes_succeeded_on(calendar_today)
+    closes_ok = closes_d == calendar_today
+    opens_ok = opens_d == calendar_today
     clear_completed_price_flags(sheet)
 
     open_block_end: Optional[int] = None
-    if evening and _evening_open_orders_ready(calendar_today):
+    open_orders_ready = _evening_open_orders_ready(calendar_today)
+    if evening and open_orders_ready:
         open_block_end = place_evening_entered_trade_flags(
             sheet, all_rows, calendar_today
         )
@@ -1425,6 +1509,20 @@ def _apply_flag_prices_to_sheet(sheet, calendar_today: date) -> Optional[date]:
         print(
             "  Evening mode but open-orders gate not met; "
             "skipping entered-day M1/O promotion."
+        )
+    elif (
+        closes_ok
+        and not opens_ok
+        and open_orders_ready
+    ):
+        # One-off: live opens today but Get_Opens had nothing to populate (no prior O).
+        open_block_end = place_live_weekday_om1_fallback(
+            sheet, all_rows, calendar_today
+        )
+    elif closes_ok and not opens_ok and not open_orders_ready:
+        print(
+            "  Closes OK today but Opens did not stamp and open-orders gate "
+            "not met; skipping live-weekday O/M1 fallback."
         )
 
     trade_dates = sorted({r.trade_date for r in all_rows})
